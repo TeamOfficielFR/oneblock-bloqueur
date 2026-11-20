@@ -2,6 +2,8 @@
   if (window.__lwab) return;
   window.__lwab = true;
 
+  // journal de diagnostic du menu (si present) : on y note les decisions du bloqueur
+  function LOG(m) { try { if (window.__lwD) window.__lwD('bloqueur: ' + m, true); } catch (e) {} }
   function call(m, a) {
     try {
       var b = window.LecteurWebApp;
@@ -173,22 +175,35 @@
     mutedEl = null; muted = false;
   }
   // Ecran noir "fantome" : YouTube garde le lecteur en mode pub (duree d'une pub sur la barre) alors qu'il n'y a plus rien a jouer.
-  // Apres 4 s sans que la lecture demarre, on recharge la page une seule fois (le conseil des utilisateurs de bloqueurs).
-  var fantId = null, fantDebut = 0;
+  // 1) apres 4 s : relance douce (le lecteur redemande la video, avec le drapeau "sans pub", sans recharger la page)
+  // 2) si toujours bloque 5 s plus tard : on recharge la page, une seule fois par video (dernier recours)
+  var fantId = null, fantDebut = 0, fantEtape = 0;
   function fantome(p, v, ad) {
     if (location.pathname.indexOf('/watch') !== 0 || !p || !v) { fantId = null; return; }
     var id = new URLSearchParams(location.search).get('v');
-    if (id !== fantId) { fantId = id; fantDebut = 0; }
-    if (!ad || v.currentTime > 0.5 || (window.__lwAgr && Date.now() < window.__lwAgr) || window.__lwPip) { fantDebut = 0; return; }
-    if (!fantDebut) { fantDebut = Date.now(); return; }
-    if (Date.now() - fantDebut < 4000) return;
+    if (id !== fantId) { fantId = id; fantDebut = 0; fantEtape = 0; }
+    if (!ad || v.currentTime > 0.5 || (window.__lwAgr && Date.now() < window.__lwAgr) || window.__lwPip) { fantDebut = 0; fantEtape = 0; return; }
+    if (!fantDebut) { fantDebut = Date.now(); fantEtape = 0; LOG('mode pub sans lecture, attente'); return; }
+    var d = Date.now() - fantDebut;
+    if (d < 4000) return;
+    if (!fantEtape && typeof p.loadVideoById === 'function') {
+      fantEtape = 1;
+      LOG('bloque ' + (d / 1000).toFixed(1) + ' s -> relance douce');
+      try {
+        var t = parseInt(new URLSearchParams(location.search).get('t'), 10) || 0;
+        p.loadVideoById(t > 0 ? { videoId: id, startSeconds: t } : id);
+      } catch (e) {}
+      return;
+    }
+    if (fantEtape && d < 9000) return;
     try {
       var cle = 'lw_fant', dej = sessionStorage.getItem(cle) || '';
       var m = /^(.*)\|(\d+)$/.exec(dej);
       if (m && m[1] === id && Date.now() - +m[2] < 120000) return; // deja recharge pour cette video
       sessionStorage.setItem(cle, id + '|' + Date.now());
     } catch (e) { return; }
-    fantDebut = 0;
+    fantDebut = 0; fantEtape = 0;
+    LOG('RECHARGEMENT de la page (toujours bloque apres ' + (d / 1000).toFixed(1) + ' s)');
     location.reload();
   }
   // Sans les pubs, le lecteur attend parfois une pub qui ne vient pas : on le relance comme si on touchait le curseur
@@ -203,6 +218,7 @@
     if (!attente || p.classList.contains('paused-mode')) return;
     if (Date.now() - blocDebut < 1500 + blocEssais * 1500) return;
     blocEssais++;
+    LOG('lecteur en attente, relance ' + blocEssais + '/4');
     try { v.currentTime = Math.max(0, v.currentTime) + 0.001; } catch (e) {}
     try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
   }
@@ -251,7 +267,7 @@
       if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration;
       var sk = document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-skip-button-container button');
       if (sk) sk.click();
-      if (!seen) { seen = true; if (Date.now() - dernierComptage > 20000) bump(); }
+      if (!seen) { seen = true; LOG('pub detectee, saut'); if (Date.now() - dernierComptage > 20000) bump(); }
     } else {
       seen = false;
       if (muted || mutedEl) rendreSon(v);
