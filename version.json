@@ -1,8 +1,7 @@
 {
-  "version": "1.5",
+  "version": "1.6",
   "script": "bloqueur.js",
-  "sha256": "cee2120586776d9f7ea12b0346a9c035e2c41c3cdd0abb282431f2c422a8e394",
+  "sha256": "009604ad5b91713bb92869ebce1e5d91f5e563333b4c993d7df0ff36f9587ee2",
   "hotes": "doubleclick.net,googlesyndication.com,googleadservices.com,googletagservices.com,googletagmanager.com,google-analytics.com,adservice.google.com,imasdk.googleapis.com",
-  "chemins": "/pagead/,/api/stats/ads,/ptracking,/pcs/activeview,/api/stats/atr,/generate_204?ad",
-  "notes": "Premiere version publiee sur GitHub"
+  "chemins": "/pagead/,/api/stats/ads,/ptracking,/pcs/activeview,/api/stats/atr,/generate_204?ad,/youtubei/v1/player/ad_break,/get_midroll_"
 }
