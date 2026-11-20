@@ -532,7 +532,8 @@
     'ytm-mini-game-card-view-model,ytm-rich-section-renderer:has(ytm-mini-game-card-view-model),ytm-rich-item-renderer:has(ytm-mini-game-card-view-model),' +
     'ytm-rich-section-renderer:has(ytm-statement-banner-renderer){display:none!important}' +
     '.html5-video-player.ad-showing video,.html5-video-player.ad-showing .ytp-ad-player-overlay,.html5-video-player.ad-showing .ytp-ad-module,' +
-    '.html5-video-player.ad-interrupting video{visibility:hidden!important}';
+    '.html5-video-player.ad-interrupting video{visibility:hidden!important}' +
+    '.ytp-unmute,.ytp-unmute *,.ytp-unmute-animated,.ytp-unmute-inner{opacity:0!important;background:transparent!important;box-shadow:none!important}';
   function style() {
     var s = document.getElementById('lw-css-pub');
     if (!s) { s = document.createElement('style'); s.id = 'lw-css-pub'; (document.head || document.documentElement).appendChild(s); }
@@ -839,6 +840,50 @@
       }
     }
   }
+  /* ---------- 4. Detecteur (compteur) ----------
+     En mode IgeBlock on ne retire plus rien des donnees, donc plus rien n'etait compte. Le detecteur regarde seulement :
+     - la reponse du lecteur de la page : pub video prevue pour cette video -> comptee (une fois par pub)
+     - les emplacements de pub dans les listes (accueil, recherche, suggestions) : chacun compte une fois
+     La pub video qui passe quand meme (cachee + sautee) reste comptee par la boucle si elle n'a pas deja ete comptee. */
+  var SEL_LISTE = 'ad-slot-renderer,ytm-ad-slot-renderer,ytm-promoted-sparkles-web-renderer,ytm-promoted-video-renderer,' +
+    'ytm-companion-ad-renderer,ytm-in-feed-ad-layout-renderer,ytm-display-ad-renderer,ytm-promoted-sparkles-text-search-renderer,ytm-search-pyv-renderer';
+  var repLues = (typeof WeakSet === 'function' ? new WeakSet() : null), pubsListe = (typeof WeakSet === 'function' ? new WeakSet() : null), nDetect = 0;
+  function lireReponse(r) {
+    if (!r || typeof r !== 'object' || !repLues || repLues.has(r)) return;
+    repLues.add(r);
+    if (!r.adPlacements && !r.adSlots && !r.playerAds) return;
+    var avant = dernierComptage;
+    compterPubsRetirees(r);
+    if (dernierComptage !== avant) LOG('detecteur : pub video prevue par YouTube (comptee)');
+  }
+  function detecteur() {
+    if (!ACTIF) return;
+    try { lireReponse(window.ytInitialPlayerResponse); } catch (e) {}
+    try {
+      var p = document.getElementById('movie_player');
+      if (p && typeof p.getPlayerResponse === 'function' && location.pathname.indexOf('/watch') === 0) lireReponse(p.getPlayerResponse());
+    } catch (e) {}
+    if (!pubsListe) return;
+    try {
+      var l = document.querySelectorAll(SEL_LISTE), n = 0;
+      for (var i = 0; i < l.length; i++) {
+        var el = l[i];
+        if (pubsListe.has(el)) continue;
+        pubsListe.add(el);
+        var haut = el.parentElement && el.parentElement.closest ? el.parentElement.closest(SEL_LISTE) : null;
+        if (haut) continue;                                   // pub dans une pub : comptee une seule fois
+        if (!el.querySelector('img,video,a,button') && !(el.textContent || '').trim()) continue; // emplacement vide
+        n++;
+      }
+      if (n) {
+        nDetect += n;
+        LOG('detecteur : ' + n + ' pub(s) cachee(s) dans la liste (total ' + nDetect + ')');
+        for (var j = 0; j < n && j < 6; j++) bump();
+      }
+    } catch (e) {}
+  }
+  setTimeout(function cycle() { try { detecteur(); } catch (e) {} setTimeout(cycle, 2000); }, 300);
+
   var prochain = 400;
   function tour() {
     prochain = 400;
