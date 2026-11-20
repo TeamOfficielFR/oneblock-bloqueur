@@ -46,15 +46,18 @@
   }
 
   /* ---------- 1. Retire les pubs des donnees de YouTube ---------- */
+  var nPrune = 0, nFlag = 0;
   var KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams', 'adBreakParams'];
   var prune = function (o, d) {
     d = d || 0;
     if (!ACTIF || !o || typeof o !== 'object' || d > 4) return o;
     try {
       if (o.adPlacements || o.adSlots || o.playerAds) compterPubsRetirees(o);
+      var gone = [];
       for (var i = 0; i < KEYS.length; i++) {
-        if (Object.prototype.hasOwnProperty.call(o, KEYS[i])) delete o[KEYS[i]];
+        if (Object.prototype.hasOwnProperty.call(o, KEYS[i])) { delete o[KEYS[i]]; gone.push(KEYS[i]); }
       }
+      if (gone.length && nPrune++ < 8) LOG('reponse nettoyee : ' + gone.join(','));
       // fenetre "les bloqueurs de pub ne sont pas autorises" : elle met la video en pause
       var mr = o.auxiliaryUi && o.auxiliaryUi.messageRenderers;
       if (mr && mr.enforcementMessageViewModel) delete mr.enforcementMessageViewModel;
@@ -145,6 +148,7 @@
       if (ACTIF && typeof r === 'string' && r.length < 60000 && r.indexOf('contentPlaybackContext') > -1 &&
           r.indexOf('isInlinePlaybackNoAd') < 0) {
         r = r.replace(FLAG_RE, function (m, fin) { return 'contentPlaybackContext":{"isInlinePlaybackNoAd":true' + (fin ? '}' : ','); });
+        if (nFlag++ < 8) LOG('drapeau sans-pub ajoute a la requete du lecteur');
       }
       return r;
     };
