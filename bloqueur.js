@@ -429,8 +429,8 @@
      en lecture automatique muette (icone du son coupe), puis IgeBlock remet le son. ONEBlock autorisait le son d'office.
      On recree la meme situation pour YouTube : au debut de chaque video, une lecture AVEC le son est refusee comme le ferait
      Android ; YouTube demarre donc en muet, et on remet le son des que la video tourne. */
-  var MUET = IGE;
-  try { if (window.__lwMuet === false) MUET = false; } catch (e) {}
+  var MUET = false;                    // 1.20 : coupe (dans une page deja ouverte, YouTube affichait le gros bouton lecture)
+  try { if (window.__lwMuet === true) MUET = true; } catch (e) {}
   var muetFini = {}, muetDebut = {}, muetT0 = {}, nRefus = 0;
   // vraie visibilite de la page (le menu la maquille pour la lecture en arriere-plan) : en arriere-plan, pas de demarrage muet
   var visO = null; try { visO = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState'); } catch (e) {}
@@ -467,6 +467,17 @@
         return playO.apply(this, arguments);
       };
     } catch (e) {}
+  }
+  // comme IgeBlock : bouton "reactiver le son" du lecteur visible sur une video -> on appuie dessus, puis sur le gros bouton lecture
+  var sonClic = 0;
+  function boutonSon(p) {
+    if (!p || location.pathname.indexOf('/watch') !== 0 || p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')) return;
+    var b = p.querySelector('button.ytp-unmute');
+    if (!b || b.offsetParent === null || Date.now() - sonClic < 1500) return;
+    sonClic = Date.now();
+    LOG('bouton son coupe de YouTube -> appui (comme IgeBlock)');
+    try { b.click(); } catch (e) {}
+    setTimeout(function () { try { var g = p.querySelector('button.ytp-large-play-button'); if (g && g.offsetParent !== null) g.click(); } catch (e) {} }, 500);
   }
   // le son est remis quand la vraie video (pas une pub) tourne depuis un instant
   function remettreSon(p, v) {
@@ -838,6 +849,7 @@
     } else {
       pubT0 = 0; pubEtape = 0;
       try { remettreSon(p, v); } catch (e) {}
+      try { boutonSon(p); } catch (e) {}
       if (v && location.pathname.indexOf('/watch') === 0) { try { if (!v.paused && v.currentTime > 0.5) { tContenu = v.currentTime; tContenuId = idPage(); } } catch (e) {} }
       if (pubDebut) { LOG('pub passee en ' + ((Date.now() - pubDebut) / 1000).toFixed(1) + ' s'); pubDebut = 0; }
       if (vitesseEl) { try { if (vitesseEl.playbackRate === 16) vitesseEl.playbackRate = vitesseAvant > 0 && vitesseAvant < 16 ? vitesseAvant : 1; } catch (e) {} vitesseEl = null; }
