@@ -468,16 +468,37 @@
       };
     } catch (e) {}
   }
-  // comme IgeBlock : bouton "reactiver le son" du lecteur visible sur une video -> on appuie dessus, puis sur le gros bouton lecture
-  var sonClic = 0;
-  function boutonSon(p) {
+  // vrai appui du doigt, envoye par Android (LecteurWeb 3.96 et +) : contrairement a un clic simule, il debloque le son et la lecture
+  function toucherNatif(el) {
+    try {
+      var b = window.LecteurWebApp;
+      if (!el || !b || typeof b.toucher !== 'function') return false;
+      var r = el.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) return false;
+      b.toucher(r.left + r.width / 2, r.top + r.height / 2);
+      return true;
+    } catch (e) { return false; }
+  }
+  function appuyer(el) { if (!toucherNatif(el)) { try { el.click(); } catch (e) {} } }
+  // comme IgeBlock : bouton "reactiver le son" visible sur une video -> appui dessus, puis sur le gros bouton lecture s'il apparait
+  var sonClic = 0, lectureClic = {};
+  function boutonSon(p, v) {
     if (!p || location.pathname.indexOf('/watch') !== 0 || p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')) return;
     var b = p.querySelector('button.ytp-unmute');
-    if (!b || b.offsetParent === null || Date.now() - sonClic < 1500) return;
-    sonClic = Date.now();
-    LOG('bouton son coupe de YouTube -> appui (comme IgeBlock)');
-    try { b.click(); } catch (e) {}
-    setTimeout(function () { try { var g = p.querySelector('button.ytp-large-play-button'); if (g && g.offsetParent !== null) g.click(); } catch (e) {} }, 500);
+    if (b && b.offsetParent !== null && Date.now() - sonClic > 1500) {
+      sonClic = Date.now();
+      LOG('bouton son coupe de YouTube -> appui' + (window.LecteurWebApp && LecteurWebApp.toucher ? ' (vrai appui)' : ''));
+      appuyer(b);
+      setTimeout(function () { try { var g = p.querySelector('button.ytp-large-play-button'); if (g && g.offsetParent !== null) appuyer(g); } catch (e) {} }, 600);
+      return;
+    }
+    // la lecture automatique a ete refusee (gros bouton lecture au debut de la video) : un appui, une fois par video
+    var g = p.querySelector('button.ytp-large-play-button'), id = idPage();
+    if (g && g.offsetParent !== null && v && v.paused && !window.__pauseUser && id && !lectureClic[id] && (v.currentTime || 0) < 2) {
+      lectureClic[id] = Date.now();
+      LOG('lecture automatique refusee -> appui sur lecture');
+      appuyer(g);
+    }
   }
   // le son est remis quand la vraie video (pas une pub) tourne depuis un instant
   function remettreSon(p, v) {
@@ -777,6 +798,7 @@
   }
   // appui simule au milieu du lecteur (comme un doigt) : toucher, puis clic
   function appuiSimule(p) {
+    if (toucherNatif(p)) { LOG('pub figee : vrai appui au milieu du lecteur'); return; }
     try {
       var r = p.getBoundingClientRect(); if (r.width < 10 || r.height < 10) return;
       var x = r.left + r.width / 2, y = r.top + r.height / 2;
@@ -849,7 +871,7 @@
     } else {
       pubT0 = 0; pubEtape = 0;
       try { remettreSon(p, v); } catch (e) {}
-      try { boutonSon(p); } catch (e) {}
+      try { boutonSon(p, v); } catch (e) {}
       if (v && location.pathname.indexOf('/watch') === 0) { try { if (!v.paused && v.currentTime > 0.5) { tContenu = v.currentTime; tContenuId = idPage(); } } catch (e) {} }
       if (pubDebut) { LOG('pub passee en ' + ((Date.now() - pubDebut) / 1000).toFixed(1) + ' s'); pubDebut = 0; }
       if (vitesseEl) { try { if (vitesseEl.playbackRate === 16) vitesseEl.playbackRate = vitesseAvant > 0 && vitesseAvant < 16 ? vitesseAvant : 1; } catch (e) {} vitesseEl = null; }
