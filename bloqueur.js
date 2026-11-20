@@ -424,6 +424,73 @@
     setTimeout(function () { try { var e2 = etatCrochets(); LOG('crochets a ' + (ms / 1000) + ' s : ' + (e2 === etat0 ? 'inchanges' : e2)); } catch (e) {} }, ms);
   });
 
+  /* ---------- 1c. Demarrage muet, comme dans IgeBlock (1.19) ----------
+     IgeBlock laisse la regle d'Android "une video qui demarre seule doit etre muette" : YouTube lance alors chaque video
+     en lecture automatique muette (icone du son coupe), puis IgeBlock remet le son. ONEBlock autorisait le son d'office.
+     On recree la meme situation pour YouTube : au debut de chaque video, une lecture AVEC le son est refusee comme le ferait
+     Android ; YouTube demarre donc en muet, et on remet le son des que la video tourne. */
+  var MUET = IGE;
+  try { if (window.__lwMuet === false) MUET = false; } catch (e) {}
+  var muetFini = {}, muetDebut = {}, muetT0 = {}, nRefus = 0;
+  // vraie visibilite de la page (le menu la maquille pour la lecture en arriere-plan) : en arriere-plan, pas de demarrage muet
+  var visO = null; try { visO = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState'); } catch (e) {}
+  function cachee() { try { return !!(visO && visO.get && visO.get.call(document) === 'hidden'); } catch (e) { return false; } }
+  function muetActif() {
+    if (!MUET || !ACTIF) return false;
+    var id = idPage();
+    if (!id || muetFini[id]) return false;
+    if ((window.__lwAgr && Date.now() < window.__lwAgr) || window.__lwPip || document.documentElement.classList.contains('lw-pip') || cachee()) return false;
+    if (!muetDebut[id]) muetDebut[id] = Date.now();
+    if (Date.now() - muetDebut[id] > 20000) return false;   // jamais plus de 20 s (le son est alors remis par remettreSon)
+    return true;
+  }
+  if (MUET) {
+    try {
+      if (typeof navigator.getAutoplayPolicy === 'function') {
+        var gap = navigator.getAutoplayPolicy;
+        navigator.getAutoplayPolicy = function () {
+          var r = gap.apply(navigator, arguments);
+          try { if (r === 'allowed' && muetActif()) return 'allowed-muted'; } catch (e) {}
+          return r;
+        };
+      }
+    } catch (e) {}
+    try {
+      var playO = HTMLMediaElement.prototype.play;
+      HTMLMediaElement.prototype.play = function () {
+        try {
+          if (this.tagName === 'VIDEO' && !this.muted && muetActif()) {
+            if (nRefus++ < 40) LOG('demarrage muet : lecture avec le son refusee (YouTube va demarrer en muet)');
+            return Promise.reject(new DOMException("play() failed because the user didn't interact with the document first.", 'NotAllowedError'));
+          }
+        } catch (e) {}
+        return playO.apply(this, arguments);
+      };
+    } catch (e) {}
+  }
+  // le son est remis quand la vraie video (pas une pub) tourne depuis un instant
+  function remettreSon(p, v) {
+    if (!MUET || !p || !v) return;
+    var id = idPage();
+    if (!id || muetFini[id] || !muetDebut[id]) return;
+    var trop = Date.now() - muetDebut[id] > 20000;          // securite : au bout de 20 s, le son est remis quoi qu'il arrive
+    if (!trop) {
+      if (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')) { muetT0[id] = 0; return; }
+      if (v.paused || v.readyState < 3 || !(v.currentTime > 0.2)) { muetT0[id] = 0; return; }
+      if (!muetT0[id]) { muetT0[id] = Date.now(); return; }
+      if (Date.now() - muetT0[id] < 400) return;
+    }
+    muetFini[id] = 1;
+    if (!v.muted) { LOG('demarrage muet : video lancee (' + ((Date.now() - muetDebut[id]) / 1000).toFixed(1) + ' s), son deja la'); return; }
+    try { if (typeof p.unMute === 'function') p.unMute(); } catch (e) {}
+    var b = document.querySelector('button.ytp-unmute,.ytp-unmute');
+    if (b && v.muted) { try { b.click(); } catch (e) {} }
+    setTimeout(function () {
+      try { if (v.muted) v.muted = false; if (v.paused) { var pr = playO.call(v); if (pr && pr.catch) pr.catch(function () {}); } } catch (e) {}
+    }, 350);
+    LOG('demarrage muet : video lancee (' + ((Date.now() - muetDebut[id]) / 1000).toFixed(1) + ' s) -> son remis');
+  }
+
   /* ---------- 2. Cache les emplacements publicitaires ---------- */
   var CSS_PUB = 'ytm-promoted-sparkles-web-renderer,ad-slot-renderer,ytm-companion-ad-renderer,ytm-promoted-video-renderer,' +
     'ytm-display-ad-renderer,ytm-statement-banner-renderer,ytm-mealbar-promo-renderer,.mealbar-promo-renderer,' +
@@ -600,6 +667,7 @@
   var muted = false, mutedEl = null, seen = false, shortsPasses = new WeakSet(), vitesseEl = null, vitesseAvant = 1, pubDebut = 0;
   // Le son coupe pendant une pub est toujours remis sur le meme element (et jamais laisse coupe)
   function rendreSon(v) {
+    if (muetActif()) { mutedEl = null; muted = false; return; }
     try { if (mutedEl) mutedEl.muted = false; } catch (e) {}
     try { if (v && muted) v.muted = false; } catch (e) {}
     mutedEl = null; muted = false;
@@ -769,6 +837,7 @@
       try { pubFigee(p, v); } catch (e) {}
     } else {
       pubT0 = 0; pubEtape = 0;
+      try { remettreSon(p, v); } catch (e) {}
       if (v && location.pathname.indexOf('/watch') === 0) { try { if (!v.paused && v.currentTime > 0.5) { tContenu = v.currentTime; tContenuId = idPage(); } } catch (e) {} }
       if (pubDebut) { LOG('pub passee en ' + ((Date.now() - pubDebut) / 1000).toFixed(1) + ' s'); pubDebut = 0; }
       if (vitesseEl) { try { if (vitesseEl.playbackRate === 16) vitesseEl.playbackRate = vitesseAvant > 0 && vitesseAvant < 16 ? vitesseAvant : 1; } catch (e) {} vitesseEl = null; }
