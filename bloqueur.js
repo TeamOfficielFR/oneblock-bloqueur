@@ -653,6 +653,40 @@
     try { v.currentTime = Math.max(0, v.currentTime) + 0.001; } catch (e) {}
     try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
   }
+  // Pub figee : le lecteur reste en mode pub sans passer a la video (pub qui ne charge pas, ou qui ne se termine pas).
+  // On insiste par etapes : relance de la pub, nouveau saut, fin forcee, nouvelle demande de la video, puis rechargement.
+  var pubT0 = 0, pubSrc = '', pubEtape = 0, tContenu = 0, tContenuId = null;
+  function pubFigee(p, v) {
+    var id = idPage(), src = '';
+    try { src = v.currentSrc || v.src || ''; } catch (e) {}
+    if (!pubT0 || src !== pubSrc) { pubT0 = Date.now(); pubSrc = src; pubEtape = 0; }   // nouvelle pub de la serie : on repart de zero
+    if (v.paused && !v.ended) { try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {} }
+    var d = Date.now() - pubT0, dur = v.duration;
+    if (d > 2500 && pubEtape < 1) {
+      pubEtape = 1;
+      LOG('pub figee ' + (d / 1000).toFixed(1) + ' s (t=' + v.currentTime.toFixed(1) + '/' + (isFinite(dur) ? dur.toFixed(1) : '?') + ', rs' + v.readyState + ') -> nouveau saut');
+      try { if (isFinite(dur) && dur > 0.4) v.currentTime = dur - 0.3; } catch (e) {}
+    } else if (d > 5000 && pubEtape < 2) {
+      pubEtape = 2;
+      LOG('pub toujours figee -> fin forcee');
+      try { if (isFinite(dur) && dur > 0) v.currentTime = dur; } catch (e) {}
+      try { v.dispatchEvent(new Event('ended')); } catch (e) {}
+    } else if (d > 7500 && pubEtape < 3 && id && typeof p.loadVideoById === 'function') {
+      pubEtape = 3;
+      var t = (tContenuId === id ? Math.floor(tContenu) : 0) || parseInt(new URLSearchParams(location.search).get('t'), 10) || 0;
+      LOG('pub figee ' + (d / 1000).toFixed(1) + ' s -> nouvelle demande de la video (t=' + t + ')');
+      try { p.loadVideoById(t > 0 ? { videoId: id, startSeconds: t } : id); } catch (e) {}
+    } else if (d > 14000 && pubEtape < 4 && id) {
+      pubEtape = 4;
+      try {
+        var cle = 'lw_fant', dej = sessionStorage.getItem(cle) || '', m = /^(.*)\|(\d+)$/.exec(dej);
+        if (m && m[1] === id && Date.now() - +m[2] < 120000) { LOG('pub figee : deja recharge pour cette video, on laisse'); return; }
+        sessionStorage.setItem(cle, id + '|' + Date.now());
+      } catch (e) { return; }
+      LOG('pub figee ' + (d / 1000).toFixed(1) + ' s -> RECHARGEMENT de la page');
+      location.reload();
+    }
+  }
   var BADGES = /^(sponsoris[eé]|sponsored|annonce|ad|publicit[eé])$/i;
   function shortPub(el) {
     if (el.querySelector('ad-slot-renderer,ytm-ad-slot-renderer,[class*="ad-badge"],ytm-promoted-sparkles-web-renderer')) return true;
@@ -695,17 +729,20 @@
     try { enAttente = attenteEcran(p, v); } catch (e) {}
     if (!enAttente && !IGE) debloquer(p, v);
     var ad = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
-    fantome(p, v, ad);
+    if (!IGE) fantome(p, v, ad);
     if (ad && v) {
       prochain = 100;
       if (!v.muted) { v.muted = true; mutedEl = v; muted = true; }
       try { if (vitesseEl !== v) { vitesseEl = v; vitesseAvant = v.playbackRate; } if (v.playbackRate !== 16) v.playbackRate = 16; } catch (e) {}
       if (!pubDebut) pubDebut = Date.now();
       if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration;
-      var sk = document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-skip-button-container button');
+      var sk = document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-skip-button-container button,.ytp-ad-skip-button-slot button');
       if (sk) sk.click();
       if (!seen) { seen = true; LOG('pub detectee, saut'); if (Date.now() - dernierComptage > 20000) bump(); }
+      try { pubFigee(p, v); } catch (e) {}
     } else {
+      pubT0 = 0; pubEtape = 0;
+      if (v && location.pathname.indexOf('/watch') === 0) { try { if (!v.paused && v.currentTime > 0.5) { tContenu = v.currentTime; tContenuId = idPage(); } } catch (e) {} }
       if (pubDebut) { LOG('pub passee en ' + ((Date.now() - pubDebut) / 1000).toFixed(1) + ' s'); pubDebut = 0; }
       if (vitesseEl) { try { if (vitesseEl.playbackRate === 16) vitesseEl.playbackRate = vitesseAvant > 0 && vitesseAvant < 16 ? vitesseAvant : 1; } catch (e) {} vitesseEl = null; }
       seen = false;
