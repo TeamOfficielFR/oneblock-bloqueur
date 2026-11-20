@@ -26,6 +26,11 @@
   // plus la video. Les pubs plus tard dans la video sont toujours retirees. Si la pub reste bloquee, on revient au retrait.
   var PASSER = true, passerEchec = {}, nEchecPasser = 0, GARDE = {};
   try { if (window.__lwPasser === false) PASSER = false; } catch (e) {}
+  // 1.16 : MODE IGEBLOCK. On ne touche plus du tout aux donnees de YouTube (aucune fonction de la page remplacee,
+  // pas de drapeau, pubs laissees dans les reponses). Les pubs video sont seulement cachees, coupees et sautees quand elles
+  // passent, les pubs des listes cachees par le style. C'est ce que fait IgeBlock. Pas d'ecran d'attente.
+  var IGE = true, ECRAN = false;
+  try { if (window.__lwIge === false) { IGE = false; ECRAN = true; } } catch (e) {}
   var jsO = JSON.stringify;
   // Le bloqueur peut etre coupe/active depuis le menu, a chaud (sans recharger la page)
   var ACTIF = call('bloqueurActif') !== false;
@@ -144,17 +149,17 @@
   };
   var jp = JSON.parse;
   var wParse = function () { return prune(jp.apply(this, arguments)); };
-  JSON.parse = wParse;
+  if (!IGE) JSON.parse = wParse;
   var wJson = null;
   try {
     var rj = Response.prototype.json;
     wJson = function () { return rj.apply(this, arguments).then(function (r) { return prune(r); }); };
-    Response.prototype.json = wJson;
+    if (!IGE) Response.prototype.json = wJson;
   } catch (e) {}
   // Reponses recues par XMLHttpRequest en JSON (elles ne passent ni par JSON.parse ni par Response.json)
   try {
     var xr = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'response');
-    if (xr && xr.get) {
+    if (xr && xr.get && !IGE) {
       Object.defineProperty(XMLHttpRequest.prototype, 'response', {
         configurable: true, enumerable: xr.enumerable,
         get: function () {
@@ -165,7 +170,7 @@
       });
     }
   } catch (e) {}
-  ['ytInitialPlayerResponse', 'playerResponse', 'ytInitialData'].forEach(function (n) {
+  if (!IGE) ['ytInitialPlayerResponse', 'playerResponse', 'ytInitialData'].forEach(function (n) {
     try {
       var v = typeof window[n] === 'object' ? prune(window[n]) : window[n];
       Object.defineProperty(window, n, { configurable: true, get: function () { return v; }, set: function (x) {
@@ -313,7 +318,7 @@
       if (typeof r === 'string' && r.length < 60000 && (r.indexOf('contentPlaybackContext') > -1 || GROUPE_RE.test(r))) r = ajouterDrapeau(r, 'JSON');
       return r;
     };
-    JSON.stringify = wStringify;
+    if (!IGE) JSON.stringify = wStringify;
   } catch (e) {}
   try {
     // YouTube fabrique parfois les options de la demande avec Object.assign(cible, base, {body: "..."})
@@ -326,7 +331,7 @@
       }
       return oa.apply(this, arguments);
     };
-    Object.assign = wAssign;
+    if (!IGE) Object.assign = wAssign;
   } catch (e) {}
   try {
     var of = window.fetch;
@@ -366,12 +371,12 @@
           return remplacer(resp, u, input, init, cb).then(null, function (e) { LOG('essai : echec (' + String(e && e.message || e).slice(0, 40) + ')'); return resp; });
         });
       };
-      window.fetch = wFetch;
+      if (!IGE) window.fetch = wFetch;
     }
   } catch (e) {}
   try {
     var xo = XMLHttpRequest.prototype.open, xs = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (m, u) { try { this.__lwP = PLAYER_RE.test(String(u)); } catch (e) {} return xo.apply(this, arguments); };
+    if (!IGE) XMLHttpRequest.prototype.open = function (m, u) { try { this.__lwP = PLAYER_RE.test(String(u)); } catch (e) {} return xo.apply(this, arguments); };
     wSend = function (b) {
       try {
         if (this.__lwP && ACTIF) {
@@ -382,7 +387,7 @@
       } catch (e) {}
       return xs.apply(this, arguments);
     };
-    XMLHttpRequest.prototype.send = wSend;
+    if (!IGE) XMLHttpRequest.prototype.send = wSend;
   } catch (e) {}
   try {
     document.addEventListener('playing', function (e) {
@@ -413,9 +418,9 @@
     return [ok(JSON, 'stringify', wStringify), ok(JSON, 'parse', wParse), ok(Object, 'assign', wAssign), ok(window, 'fetch', wFetch),
       ok(Response.prototype, 'json', wJson), ok(XMLHttpRequest.prototype, 'send', wSend)].join(', ');
   }
-  var etat0 = etatCrochets();
-  LOG('crochets : ' + etat0);
-  [3000, 12000].forEach(function (ms) {
+  var etat0 = IGE ? '' : etatCrochets();
+  LOG(IGE ? 'mode IgeBlock : donnees de YouTube non modifiees (aucun crochet, pas de drapeau), pubs sautees quand elles passent' : 'crochets : ' + etat0);
+  if (!IGE) [3000, 12000].forEach(function (ms) {
     setTimeout(function () { try { var e2 = etatCrochets(); LOG('crochets a ' + (ms / 1000) + ' s : ' + (e2 === etat0 ? 'inchanges' : e2)); } catch (e) {} }, ms);
   });
 
@@ -426,7 +431,9 @@
     'ytm-rich-item-renderer:has(ad-slot-renderer),ytm-rich-item-renderer:has(ytm-ad-slot-renderer),ytm-item-section-renderer:has(>ad-slot-renderer),' +
     'ytm-promoted-sparkles-text-search-renderer,ytm-search-pyv-renderer,ytm-reel-shelf-renderer:has(ad-slot-renderer),' +
     'ytm-mini-game-card-view-model,ytm-rich-section-renderer:has(ytm-mini-game-card-view-model),ytm-rich-item-renderer:has(ytm-mini-game-card-view-model),' +
-    'ytm-rich-section-renderer:has(ytm-statement-banner-renderer){display:none!important}';
+    'ytm-rich-section-renderer:has(ytm-statement-banner-renderer){display:none!important}' +
+    '.html5-video-player.ad-showing video,.html5-video-player.ad-showing .ytp-ad-player-overlay,.html5-video-player.ad-showing .ytp-ad-module,' +
+    '.html5-video-player.ad-interrupting video{visibility:hidden!important}';
   function style() {
     var s = document.getElementById('lw-css-pub');
     if (!s) { s = document.createElement('style'); s.id = 'lw-css-pub'; (document.head || document.documentElement).appendChild(s); }
@@ -558,6 +565,7 @@
   }
   // vrai pendant l'attente imposee (l'ecran est alors affiche)
   function attenteEcran(p, v) {
+    if (!ECRAN) { if (ecran) montrerAttente(null); return false; }
     var id = idPage(), a = id && ATT[id], on = false;
     if (a && !a.fini) {
       var dep = Date.now() - a.t, pub = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
@@ -685,7 +693,7 @@
     passerShortPub();
     var enAttente = false;
     try { enAttente = attenteEcran(p, v); } catch (e) {}
-    if (!enAttente) debloquer(p, v);
+    if (!enAttente && !IGE) debloquer(p, v);
     var ad = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
     fantome(p, v, ad);
     if (ad && v) {
