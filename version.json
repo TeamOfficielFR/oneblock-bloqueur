@@ -1,7 +1,7 @@
 {
-  "version": "1.6",
+  "version": "1.7",
   "script": "bloqueur.js",
-  "sha256": "009604ad5b91713bb92869ebce1e5d91f5e563333b4c993d7df0ff36f9587ee2",
+  "sha256": "a38a7c830718ecd0475ac43396df48460999b97d5cf15fea890394f303cd317c",
   "hotes": "doubleclick.net,googlesyndication.com,googleadservices.com,googletagservices.com,googletagmanager.com,google-analytics.com,adservice.google.com,imasdk.googleapis.com",
   "chemins": "/pagead/,/api/stats/ads,/ptracking,/pcs/activeview,/api/stats/atr,/generate_204?ad,/youtubei/v1/player/ad_break,/get_midroll_"
 }
