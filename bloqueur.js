@@ -662,22 +662,31 @@
     if (!pubT0 || src !== pubSrc) { pubT0 = Date.now(); pubSrc = src; pubEtape = 0; }   // nouvelle pub de la serie : on repart de zero
     if (v.paused && !v.ended) { try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {} }
     var d = Date.now() - pubT0, dur = v.duration;
-    if (d > 2500 && pubEtape < 1) {
+    if (d > 1800 && pubEtape < 1) {
+      // un appui sur la pub la debloque : on fait la meme chose (lecture demandee au lecteur + appui simule)
       pubEtape = 1;
-      LOG('pub figee ' + (d / 1000).toFixed(1) + ' s (t=' + v.currentTime.toFixed(1) + '/' + (isFinite(dur) ? dur.toFixed(1) : '?') + ', rs' + v.readyState + ') -> nouveau saut');
+      LOG('pub figee ' + (d / 1000).toFixed(1) + ' s (t=' + v.currentTime.toFixed(1) + '/' + (isFinite(dur) ? dur.toFixed(1) : '?') + ', rs' + v.readyState +
+        (v.paused ? ', en pause' : '') + ') -> lecture forcee + appui simule');
+      try { if (typeof p.playVideo === 'function') p.playVideo(); } catch (e) {}
+      appuiSimule(p);
       try { if (isFinite(dur) && dur > 0.4) v.currentTime = dur - 0.3; } catch (e) {}
-    } else if (d > 5000 && pubEtape < 2) {
+    } else if (d > 3500 && pubEtape < 2) {
       pubEtape = 2;
+      LOG('pub toujours figee -> nouvel appui simule');
+      appuiSimule(p);
+      try { if (typeof p.playVideo === 'function') p.playVideo(); } catch (e) {}
+    } else if (d > 5000 && pubEtape < 3) {
+      pubEtape = 3;
       LOG('pub toujours figee -> fin forcee');
       try { if (isFinite(dur) && dur > 0) v.currentTime = dur; } catch (e) {}
       try { v.dispatchEvent(new Event('ended')); } catch (e) {}
-    } else if (d > 7500 && pubEtape < 3 && id && typeof p.loadVideoById === 'function') {
-      pubEtape = 3;
+    } else if (d > 7500 && pubEtape < 4 && id && typeof p.loadVideoById === 'function') {
+      pubEtape = 4;
       var t = (tContenuId === id ? Math.floor(tContenu) : 0) || parseInt(new URLSearchParams(location.search).get('t'), 10) || 0;
       LOG('pub figee ' + (d / 1000).toFixed(1) + ' s -> nouvelle demande de la video (t=' + t + ')');
       try { p.loadVideoById(t > 0 ? { videoId: id, startSeconds: t } : id); } catch (e) {}
-    } else if (d > 14000 && pubEtape < 4 && id) {
-      pubEtape = 4;
+    } else if (d > 14000 && pubEtape < 5 && id) {
+      pubEtape = 5;
       try {
         var cle = 'lw_fant', dej = sessionStorage.getItem(cle) || '', m = /^(.*)\|(\d+)$/.exec(dej);
         if (m && m[1] === id && Date.now() - +m[2] < 120000) { LOG('pub figee : deja recharge pour cette video, on laisse'); return; }
@@ -686,6 +695,24 @@
       LOG('pub figee ' + (d / 1000).toFixed(1) + ' s -> RECHARGEMENT de la page');
       location.reload();
     }
+  }
+  // appui simule au milieu du lecteur (comme un doigt) : toucher, puis clic
+  function appuiSimule(p) {
+    try {
+      var r = p.getBoundingClientRect(); if (r.width < 10 || r.height < 10) return;
+      var x = r.left + r.width / 2, y = r.top + r.height / 2;
+      var cible = document.elementFromPoint(x, y);
+      if (!cible || !p.contains(cible)) cible = p.querySelector('#player-control-overlay') || p;
+      try {
+        var tc = new Touch({ identifier: Date.now(), target: cible, clientX: x, clientY: y });
+        cible.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [tc], targetTouches: [tc], changedTouches: [tc] }));
+        cible.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: [tc] }));
+      } catch (e) {}
+      var o = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+      ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (n) {
+        try { cible.dispatchEvent(n.indexOf('pointer') === 0 && typeof PointerEvent === 'function' ? new PointerEvent(n, o) : new MouseEvent(n, o)); } catch (e) {}
+      });
+    } catch (e) {}
   }
   var BADGES = /^(sponsoris[eé]|sponsored|annonce|ad|publicit[eé])$/i;
   function shortPub(el) {
