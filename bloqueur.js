@@ -55,7 +55,7 @@
   }
 
   /* ---------- 1. Retire les pubs des donnees de YouTube ---------- */
-  var nPrune = 0, nFlag = 0, nRep = 0, nReq = 0, tFlag = 0, SRC = '', pubsId = {}, repT = {};
+  var nPrune = 0, nFlag = 0, nRep = 0, nReq = 0, tFlag = 0, SRC = '', repVues = (typeof WeakSet === 'function' ? new WeakSet() : null);
   var KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams', 'adBreakParams'];
   var prune = function (o, d) {
     d = d || 0;
@@ -69,13 +69,13 @@
       var vid = o.videoDetails && o.videoDetails.videoId;
       if (vid && (gone.length || o.streamingData)) {
         // reponse du lecteur : on note si YouTube avait prevu une pub et si le drapeau "sans pub" etait parti avec la demande
-        var now = Date.now(), cle = vid + (gone.length ? 'P' : 'S');
-        if (gone.length) pubsId[vid] = now;
-        var doublon = repT[cle] && now - repT[cle] < 5000 || (!gone.length && pubsId[vid] && now - pubsId[vid] < 5000);
-        repT[cle] = now;
-        if (!doublon && nRep++ < 60) {
+        // (un objet deja traite n'est pas note deux fois ; deux reponses successives pour la meme video le sont toutes les deux)
+        var now = Date.now(), deja = repVues ? repVues.has(o) : false;
+        if (repVues) repVues.add(o);
+        if (!deja && nRep++ < 60) {
           LOG('reponse lecteur ' + vid + (SRC ? ' [' + SRC + ']' : '') + ' : ' + (gone.length ? 'PUBS retirees (' + gone.join(',') + ')' : 'sans pub') +
-            ', drapeau ' + (tFlag && now - tFlag < 25000 ? 'envoye il y a ' + ((now - tFlag) / 1000).toFixed(1) + ' s' : 'NON envoye'));
+            ', drapeau ' + (tFlag && now - tFlag < 25000 ? 'envoye il y a ' + ((now - tFlag) / 1000).toFixed(1) + ' s' : 'NON envoye') +
+            (o.videoDetails.isLive ? ', direct' : ''));
         }
       } else if (gone.length && nPrune++ < 60) LOG('reponse nettoyee : ' + gone.join(','));
       // fenetre "les bloqueurs de pub ne sont pas autorises" : elle met la video en pause
@@ -170,22 +170,50 @@
   var FLAG_RE = /contentPlaybackContext":\{(\}?)/;
   var PLAYER_RE = /\/youtubei\/v1\/player(\?|$)/;
   var oa = Object.assign;
+  function client(c) { var m = /"clientName":"([A-Z_]+)"/.exec(c); return m ? m[1] : null; }
   function idDe(c) { var m = /"videoId":"([\w-]{11})"/.exec(c); return m ? m[1] : null; }
   function ajouterDrapeau(c, via) {
     if (!ACTIF || typeof c !== 'string' || c.length > 60000 || c.indexOf('contentPlaybackContext') < 0 || c.indexOf('isInlinePlaybackNoAd') > -1) return c;
     var r = c.replace(FLAG_RE, function (m, fin) { return 'contentPlaybackContext":{"isInlinePlaybackNoAd":true' + (fin ? '}' : ','); });
-    if (r !== c) { tFlag = Date.now(); if (nFlag++ < 60) LOG('drapeau ajoute (' + via + ') ' + (idDe(r) || '')); }
+    if (r !== c) {
+      tFlag = Date.now();
+      if (nFlag++ < 60) {
+        var cles = ''; try { cles = ' {' + Object.keys(jp.call(JSON, r)).join(',').slice(0, 70) + '}'; } catch (e) {}
+        LOG('drapeau ajoute (' + via + ') ' + (idDe(r) || '') + ' ' + (client(r) || '') + cles);
+      }
+    }
     return r;
   }
   // une ligne par demande du lecteur, avec l'etat final du drapeau
-  function noterRequete(via, c) {
+  function noterRequete(via, c, info) {
     if (nReq++ >= 60) return;
-    var etat = typeof c !== 'string' ? 'corps ' + typeof c :
+    var etat = typeof c !== 'string' ? 'corps ' + (c === undefined || c === null ? 'vide' : (c.constructor && c.constructor.name) || typeof c) :
       c.indexOf('isInlinePlaybackNoAd') > -1 ? 'drapeau present' :
-      c.indexOf('contentPlaybackContext') > -1 ? 'drapeau ABSENT' : 'pas de contentPlaybackContext';
+      c.indexOf('contentPlaybackContext') > -1 ? 'drapeau ABSENT' : 'pas de contentPlaybackContext (' + c.length + ' car.)';
     var cles = '';
     if (typeof c === 'string' && etat.indexOf('pas de') === 0) { try { cles = ' {' + Object.keys(jp.call(JSON, c)).join(',').slice(0, 60) + '}'; } catch (e) {} }
-    LOG('requete lecteur (' + via + ') ' + ((typeof c === 'string' && idDe(c)) || '?') + ' : ' + etat + cles);
+    LOG('requete lecteur (' + via + ') ' + ((typeof c === 'string' && idDe(c)) || '?') + ' ' + ((typeof c === 'string' && client(c)) || '') + ' : ' + etat + cles + (info ? ' ' + info : ''));
+  }
+  // corps binaire (compresse ou non) : on le lit, on ajoute le drapeau, on le recompresse de la meme facon
+  function enTexte(buf) {
+    var u = new Uint8Array(buf);
+    if (u.length > 2 && u[0] === 0x1f && u[1] === 0x8b && typeof DecompressionStream === 'function') {
+      return new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('gzip'))).text().then(function (t) { return { txt: t, gz: true, n: u.length }; });
+    }
+    return Promise.resolve({ txt: new TextDecoder().decode(u), gz: false, n: u.length });
+  }
+  function enOctets(txt, gz) {
+    if (gz && typeof CompressionStream === 'function') return new Response(new Blob([txt]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
+    return Promise.resolve(new Blob([txt]));
+  }
+  // prepare : promesse de la demande a envoyer (null = on envoie l'originale)
+  function preparerBinaire(octetsP, via, refaire) {
+    return octetsP.then(enTexte).then(function (r) {
+      var nb = ajouterDrapeau(r.txt, via + (r.gz ? ' gzip' : ''));
+      noterRequete(via, nb, (r.gz ? 'gzip ' : 'brut ') + r.n + ' o');
+      if (nb === r.txt) return null;
+      return enOctets(nb, r.gz).then(refaire);
+    }).catch(function (e) { LOG('corps de la demande illisible (' + via + ') : ' + String(e && e.message || e).slice(0, 40)); return null; });
   }
   var wStringify = null, wAssign = null, wFetch = null, wSend = null;
   try {
@@ -216,19 +244,19 @@
       wFetch = function (input, init) {
         try {
           var u = typeof input === 'string' ? input : (input && input.url) || String(input || '');
-          if (PLAYER_RE.test(u)) {
-            if (init && typeof init.body === 'string') {
-              var nb = ajouterDrapeau(init.body, 'fetch');
+          if (ACTIF && PLAYER_RE.test(u)) {
+            var me = this, b0 = init && init.body;
+            if (init && typeof b0 === 'string') {
+              var nb = ajouterDrapeau(b0, 'fetch');
               noterRequete('fetch', nb);
-              if (nb !== init.body) return of.call(this, input, oa({}, init, { body: nb }));
+              if (nb !== b0) return of.call(this, input, oa({}, init, { body: nb }));
+            } else if (init && b0 && (b0 instanceof Blob || b0 instanceof ArrayBuffer || ArrayBuffer.isView(b0))) {
+              return preparerBinaire(new Response(b0).arrayBuffer(), 'fetch/binaire', function (blob) { return oa({}, init, { body: blob }); })
+                .then(function (ni) { return ni ? of.call(me, input, ni) : of.call(me, input, init); });
             } else if (!init && input && typeof input === 'object' && typeof input.clone === 'function' && input.method === 'POST') {
-              var me = this;
-              return input.clone().text().then(function (txt) {
-                var nb2 = ajouterDrapeau(txt, 'fetch/Request');
-                noterRequete('fetch/Request', nb2);
-                return nb2 === txt ? of.call(me, input) : of.call(me, new Request(input, { body: nb2 }));
-              }, function () { return of.call(me, input); });
-            } else noterRequete('fetch', init && init.body);
+              return preparerBinaire(input.clone().arrayBuffer(), 'fetch/Request', function (blob) { return new Request(input, { body: blob }); })
+                .then(function (nr) { return of.call(me, nr || input); });
+            } else noterRequete('fetch', b0);
           }
         } catch (e) {}
         return of.apply(this, arguments);
@@ -241,7 +269,7 @@
     XMLHttpRequest.prototype.open = function (m, u) { try { this.__lwP = PLAYER_RE.test(String(u)); } catch (e) {} return xo.apply(this, arguments); };
     wSend = function (b) {
       try {
-        if (this.__lwP) {
+        if (this.__lwP && ACTIF) {
           var nb = ajouterDrapeau(b, 'XHR');
           noterRequete('XHR', nb);
           if (nb !== b) return xs.call(this, nb);
@@ -339,27 +367,6 @@
     try { v.currentTime = Math.max(0, v.currentTime) + 0.001; } catch (e) {}
     try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
   }
-  // Depart bloque alors que YouTube avait prevu une pub (attente factice) : on redemande la video une fois, avec le drapeau
-  // "sans pub" (la requete passe par nos crochets) ; utile surtout quand la page a ete chargee avec la reponse deja integree.
-  var rdId = null, rdDebut = 0, rdFait = {};
-  function relanceDepart(p, v) {
-    if (location.pathname.indexOf('/watch') !== 0 || !p || !v) { rdId = null; rdDebut = 0; return; }
-    var id = new URLSearchParams(location.search).get('v');
-    if (id !== rdId) { rdId = id; rdDebut = 0; }
-    var cl = p.classList;
-    var bloque = v.currentTime < 0.5 && !cl.contains('paused-mode') && !cl.contains('ad-showing') && !cl.contains('ad-interrupting') &&
-      (cl.contains('buffering-mode') || cl.contains('unstarted-mode') || v.readyState < 3);
-    if (!bloque || !id || !pubsId[id] || (rdFait[id] && Date.now() - rdFait[id] < 120000) ||
-        (window.__lwAgr && Date.now() < window.__lwAgr) || window.__lwPip || window.__pauseUser || typeof p.loadVideoById !== 'function') { rdDebut = 0; return; }
-    if (!rdDebut) { rdDebut = Date.now(); return; }
-    var d = Date.now() - rdDebut;
-    if (d < 3000) return;
-    rdFait[id] = Date.now(); rdDebut = 0;
-    var st = parseInt(new URLSearchParams(location.search).get('t'), 10) || 0;
-    if (!st) { try { var pr = p.getPlayerResponse && p.getPlayerResponse(), c = pr && pr.playerConfig && pr.playerConfig.playbackStartConfig; if (c && c.startSeconds > 0) st = c.startSeconds; } catch (e) {} }
-    LOG('depart bloque ' + (d / 1000).toFixed(1) + ' s apres pubs retirees -> relance (nouvelle demande)');
-    try { p.loadVideoById(st > 0 ? { videoId: id, startSeconds: st } : id); } catch (e) {}
-  }
   var BADGES = /^(sponsoris[eé]|sponsored|annonce|ad|publicit[eé])$/i;
   function shortPub(el) {
     if (el.querySelector('ad-slot-renderer,ytm-ad-slot-renderer,[class*="ad-badge"],ytm-promoted-sparkles-web-renderer')) return true;
@@ -397,7 +404,6 @@
     }
     passerShortPub();
     debloquer(p, v);
-    relanceDepart(p, v);
     var ad = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
     fantome(p, v, ad);
     if (ad && v) {
