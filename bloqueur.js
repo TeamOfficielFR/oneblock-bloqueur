@@ -3,7 +3,12 @@
   window.__lwab = true;
 
   // journal de diagnostic du menu (si present) : on y note les decisions du bloqueur
-  function LOG(m) { try { if (window.__lwD) window.__lwD('bloqueur: ' + m, true); } catch (e) {} }
+  function LOG(m) {
+    try {
+      if (window.__lwD) window.__lwD('bloqueur: ' + m, true);
+      else { var q = (window.__lwQ = window.__lwQ || []); if (q.length < 60) q.push('bloqueur: ' + m); }
+    } catch (e) {}
+  }
   function call(m, a) {
     try {
       var b = window.LecteurWebApp;
@@ -11,6 +16,10 @@
       return a === undefined ? b[m]() : b[m](a);
     } catch (e) { return undefined; }
   }
+  try {
+    LOG('demarrage ' + (window.ytcfg || window.yt ? 'APRES les scripts du site (trop tard)' : 'avant les scripts du site') +
+      ' (scripts ' + document.scripts.length + ', ' + document.readyState + ', ' + location.pathname.slice(0, 14) + ')');
+  } catch (e) {}
   // Le bloqueur peut etre coupe/active depuis le menu, a chaud (sans recharger la page)
   var ACTIF = call('bloqueurActif') !== false;
   setInterval(function () { ACTIF = call('bloqueurActif') !== false; }, 800);
@@ -46,7 +55,7 @@
   }
 
   /* ---------- 1. Retire les pubs des donnees de YouTube ---------- */
-  var nPrune = 0, nFlag = 0;
+  var nPrune = 0, nFlag = 0, nRep = 0, nReq = 0, tFlag = 0, SRC = '', pubsId = {}, repT = {};
   var KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams', 'adBreakParams'];
   var prune = function (o, d) {
     d = d || 0;
@@ -57,7 +66,18 @@
       for (var i = 0; i < KEYS.length; i++) {
         if (Object.prototype.hasOwnProperty.call(o, KEYS[i])) { delete o[KEYS[i]]; gone.push(KEYS[i]); }
       }
-      if (gone.length && nPrune++ < 8) LOG('reponse nettoyee : ' + gone.join(','));
+      var vid = o.videoDetails && o.videoDetails.videoId;
+      if (vid && (gone.length || o.streamingData)) {
+        // reponse du lecteur : on note si YouTube avait prevu une pub et si le drapeau "sans pub" etait parti avec la demande
+        var now = Date.now(), cle = vid + (gone.length ? 'P' : 'S');
+        if (gone.length) pubsId[vid] = now;
+        var doublon = repT[cle] && now - repT[cle] < 5000 || (!gone.length && pubsId[vid] && now - pubsId[vid] < 5000);
+        repT[cle] = now;
+        if (!doublon && nRep++ < 60) {
+          LOG('reponse lecteur ' + vid + (SRC ? ' [' + SRC + ']' : '') + ' : ' + (gone.length ? 'PUBS retirees (' + gone.join(',') + ')' : 'sans pub') +
+            ', drapeau ' + (tFlag && now - tFlag < 25000 ? 'envoye il y a ' + ((now - tFlag) / 1000).toFixed(1) + ' s' : 'NON envoye'));
+        }
+      } else if (gone.length && nPrune++ < 60) LOG('reponse nettoyee : ' + gone.join(','));
       // fenetre "les bloqueurs de pub ne sont pas autorises" : elle met la video en pause
       var mr = o.auxiliaryUi && o.auxiliaryUi.messageRenderers;
       if (mr && mr.enforcementMessageViewModel) delete mr.enforcementMessageViewModel;
@@ -110,10 +130,13 @@
     return o;
   };
   var jp = JSON.parse;
-  JSON.parse = function () { return prune(jp.apply(this, arguments)); };
+  var wParse = function () { return prune(jp.apply(this, arguments)); };
+  JSON.parse = wParse;
+  var wJson = null;
   try {
     var rj = Response.prototype.json;
-    Response.prototype.json = function () { return rj.apply(this, arguments).then(function (r) { return prune(r); }); };
+    wJson = function () { return rj.apply(this, arguments).then(function (r) { return prune(r); }); };
+    Response.prototype.json = wJson;
   } catch (e) {}
   // Reponses recues par XMLHttpRequest en JSON (elles ne passent ni par JSON.parse ni par Response.json)
   try {
@@ -132,7 +155,9 @@
   ['ytInitialPlayerResponse', 'playerResponse', 'ytInitialData'].forEach(function (n) {
     try {
       var v = typeof window[n] === 'object' ? prune(window[n]) : window[n];
-      Object.defineProperty(window, n, { configurable: true, get: function () { return v; }, set: function (x) { v = (x && typeof x === 'object') ? prune(x) : x; } });
+      Object.defineProperty(window, n, { configurable: true, get: function () { return v; }, set: function (x) {
+        SRC = 'chargement a froid'; try { v = (x && typeof x === 'object') ? prune(x) : x; } finally { SRC = ''; }
+      } });
     } catch (e) {}
   });
 
@@ -140,19 +165,107 @@
   // Pour certains comptes avec bloqueur, YouTube retarde le premier flux video de la duree d'une pub (ecran noir).
   // On ajoute "isInlinePlaybackNoAd" dans la requete du lecteur : le serveur n'envoie alors ni pub ni attente.
   // Fonctionne quand on passe d'une video a l'autre dans la page (la requete est faite ici, pas par le serveur).
+  // La requete peut etre fabriquee de plusieurs facons selon la version de YouTube : on regarde donc a 4 endroits
+  // (JSON.stringify, Object.assign, fetch, XMLHttpRequest) ; le premier qui voit le corps le complete, les autres le laissent.
   var FLAG_RE = /contentPlaybackContext":\{(\}?)/;
+  var PLAYER_RE = /\/youtubei\/v1\/player(\?|$)/;
+  var oa = Object.assign;
+  function idDe(c) { var m = /"videoId":"([\w-]{11})"/.exec(c); return m ? m[1] : null; }
+  function ajouterDrapeau(c, via) {
+    if (!ACTIF || typeof c !== 'string' || c.length > 60000 || c.indexOf('contentPlaybackContext') < 0 || c.indexOf('isInlinePlaybackNoAd') > -1) return c;
+    var r = c.replace(FLAG_RE, function (m, fin) { return 'contentPlaybackContext":{"isInlinePlaybackNoAd":true' + (fin ? '}' : ','); });
+    if (r !== c) { tFlag = Date.now(); if (nFlag++ < 60) LOG('drapeau ajoute (' + via + ') ' + (idDe(r) || '')); }
+    return r;
+  }
+  // une ligne par demande du lecteur, avec l'etat final du drapeau
+  function noterRequete(via, c) {
+    if (nReq++ >= 60) return;
+    var etat = typeof c !== 'string' ? 'corps ' + typeof c :
+      c.indexOf('isInlinePlaybackNoAd') > -1 ? 'drapeau present' :
+      c.indexOf('contentPlaybackContext') > -1 ? 'drapeau ABSENT' : 'pas de contentPlaybackContext';
+    var cles = '';
+    if (typeof c === 'string' && etat.indexOf('pas de') === 0) { try { cles = ' {' + Object.keys(jp.call(JSON, c)).join(',').slice(0, 60) + '}'; } catch (e) {} }
+    LOG('requete lecteur (' + via + ') ' + ((typeof c === 'string' && idDe(c)) || '?') + ' : ' + etat + cles);
+  }
+  var wStringify = null, wAssign = null, wFetch = null, wSend = null;
   try {
     var js = JSON.stringify;
-    JSON.stringify = function () {
+    wStringify = function () {
       var r = js.apply(this, arguments);
-      if (ACTIF && typeof r === 'string' && r.length < 60000 && r.indexOf('contentPlaybackContext') > -1 &&
-          r.indexOf('isInlinePlaybackNoAd') < 0) {
-        r = r.replace(FLAG_RE, function (m, fin) { return 'contentPlaybackContext":{"isInlinePlaybackNoAd":true' + (fin ? '}' : ','); });
-        if (nFlag++ < 8) LOG('drapeau sans-pub ajoute a la requete du lecteur');
-      }
+      if (typeof r === 'string' && r.length < 60000 && r.indexOf('contentPlaybackContext') > -1) r = ajouterDrapeau(r, 'JSON');
       return r;
     };
+    JSON.stringify = wStringify;
   } catch (e) {}
+  try {
+    // YouTube fabrique parfois les options de la demande avec Object.assign(cible, base, {body: "..."})
+    wAssign = function (t, a, b) {
+      if (arguments.length === 3 && ACTIF && b && typeof b === 'object' && typeof b.body === 'string' && b.body.indexOf('contentPlaybackContext') > -1) {
+        try {
+          var nb = ajouterDrapeau(b.body, 'Object.assign');
+          if (nb !== b.body) return oa.call(this, t, a, oa({}, b, { body: nb }));
+        } catch (e) {}
+      }
+      return oa.apply(this, arguments);
+    };
+    Object.assign = wAssign;
+  } catch (e) {}
+  try {
+    var of = window.fetch;
+    if (typeof of === 'function') {
+      wFetch = function (input, init) {
+        try {
+          var u = typeof input === 'string' ? input : (input && input.url) || String(input || '');
+          if (PLAYER_RE.test(u)) {
+            if (init && typeof init.body === 'string') {
+              var nb = ajouterDrapeau(init.body, 'fetch');
+              noterRequete('fetch', nb);
+              if (nb !== init.body) return of.call(this, input, oa({}, init, { body: nb }));
+            } else if (!init && input && typeof input === 'object' && typeof input.clone === 'function' && input.method === 'POST') {
+              var me = this;
+              return input.clone().text().then(function (txt) {
+                var nb2 = ajouterDrapeau(txt, 'fetch/Request');
+                noterRequete('fetch/Request', nb2);
+                return nb2 === txt ? of.call(me, input) : of.call(me, new Request(input, { body: nb2 }));
+              }, function () { return of.call(me, input); });
+            } else noterRequete('fetch', init && init.body);
+          }
+        } catch (e) {}
+        return of.apply(this, arguments);
+      };
+      window.fetch = wFetch;
+    }
+  } catch (e) {}
+  try {
+    var xo = XMLHttpRequest.prototype.open, xs = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (m, u) { try { this.__lwP = PLAYER_RE.test(String(u)); } catch (e) {} return xo.apply(this, arguments); };
+    wSend = function (b) {
+      try {
+        if (this.__lwP) {
+          var nb = ajouterDrapeau(b, 'XHR');
+          noterRequete('XHR', nb);
+          if (nb !== b) return xs.call(this, nb);
+        }
+      } catch (e) {}
+      return xs.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = wSend;
+  } catch (e) {}
+  // Auto-verification : le site ou un autre script a-t-il repris la main sur nos crochets ?
+  function etatCrochets() {
+    function ok(obj, nom, w) {
+      if (!w) return nom + ' absent';
+      var d = null; try { d = Object.getOwnPropertyDescriptor(obj, nom); } catch (e) {}
+      return nom + (obj[nom] === w ? ' ok' : ' REMPLACE') + (d && d.writable === false ? ' (verrouille)' : '');
+    }
+    return [ok(JSON, 'stringify', wStringify), ok(JSON, 'parse', wParse), ok(Object, 'assign', wAssign), ok(window, 'fetch', wFetch),
+      ok(Response.prototype, 'json', wJson), ok(XMLHttpRequest.prototype, 'send', wSend)].join(', ');
+  }
+  var etat0 = etatCrochets();
+  LOG('crochets : ' + etat0);
+  [3000, 12000].forEach(function (ms) {
+    setTimeout(function () { try { var e2 = etatCrochets(); LOG('crochets a ' + (ms / 1000) + ' s : ' + (e2 === etat0 ? 'inchanges' : e2)); } catch (e) {} }, ms);
+  });
 
   /* ---------- 2. Cache les emplacements publicitaires ---------- */
   var CSS_PUB = 'ytm-promoted-sparkles-web-renderer,ad-slot-renderer,ytm-companion-ad-renderer,ytm-promoted-video-renderer,' +
@@ -226,6 +339,27 @@
     try { v.currentTime = Math.max(0, v.currentTime) + 0.001; } catch (e) {}
     try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
   }
+  // Depart bloque alors que YouTube avait prevu une pub (attente factice) : on redemande la video une fois, avec le drapeau
+  // "sans pub" (la requete passe par nos crochets) ; utile surtout quand la page a ete chargee avec la reponse deja integree.
+  var rdId = null, rdDebut = 0, rdFait = {};
+  function relanceDepart(p, v) {
+    if (location.pathname.indexOf('/watch') !== 0 || !p || !v) { rdId = null; rdDebut = 0; return; }
+    var id = new URLSearchParams(location.search).get('v');
+    if (id !== rdId) { rdId = id; rdDebut = 0; }
+    var cl = p.classList;
+    var bloque = v.currentTime < 0.5 && !cl.contains('paused-mode') && !cl.contains('ad-showing') && !cl.contains('ad-interrupting') &&
+      (cl.contains('buffering-mode') || cl.contains('unstarted-mode') || v.readyState < 3);
+    if (!bloque || !id || !pubsId[id] || (rdFait[id] && Date.now() - rdFait[id] < 120000) ||
+        (window.__lwAgr && Date.now() < window.__lwAgr) || window.__lwPip || window.__pauseUser || typeof p.loadVideoById !== 'function') { rdDebut = 0; return; }
+    if (!rdDebut) { rdDebut = Date.now(); return; }
+    var d = Date.now() - rdDebut;
+    if (d < 3000) return;
+    rdFait[id] = Date.now(); rdDebut = 0;
+    var st = parseInt(new URLSearchParams(location.search).get('t'), 10) || 0;
+    if (!st) { try { var pr = p.getPlayerResponse && p.getPlayerResponse(), c = pr && pr.playerConfig && pr.playerConfig.playbackStartConfig; if (c && c.startSeconds > 0) st = c.startSeconds; } catch (e) {} }
+    LOG('depart bloque ' + (d / 1000).toFixed(1) + ' s apres pubs retirees -> relance (nouvelle demande)');
+    try { p.loadVideoById(st > 0 ? { videoId: id, startSeconds: st } : id); } catch (e) {}
+  }
   var BADGES = /^(sponsoris[eé]|sponsored|annonce|ad|publicit[eé])$/i;
   function shortPub(el) {
     if (el.querySelector('ad-slot-renderer,ytm-ad-slot-renderer,[class*="ad-badge"],ytm-promoted-sparkles-web-renderer')) return true;
@@ -263,6 +397,7 @@
     }
     passerShortPub();
     debloquer(p, v);
+    relanceDepart(p, v);
     var ad = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
     fantome(p, v, ad);
     if (ad && v) {
