@@ -110,6 +110,20 @@
     var rj = Response.prototype.json;
     Response.prototype.json = function () { return rj.apply(this, arguments).then(function (r) { return prune(r); }); };
   } catch (e) {}
+  // Reponses recues par XMLHttpRequest en JSON (elles ne passent ni par JSON.parse ni par Response.json)
+  try {
+    var xr = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'response');
+    if (xr && xr.get) {
+      Object.defineProperty(XMLHttpRequest.prototype, 'response', {
+        configurable: true, enumerable: xr.enumerable,
+        get: function () {
+          var r = xr.get.call(this);
+          if (r && typeof r === 'object' && this.responseType === 'json' && this.readyState === 4) { try { prune(r); } catch (e) {} }
+          return r;
+        }
+      });
+    }
+  } catch (e) {}
   ['ytInitialPlayerResponse', 'playerResponse', 'ytInitialData'].forEach(function (n) {
     try {
       var v = typeof window[n] === 'object' ? prune(window[n]) : window[n];
@@ -151,7 +165,32 @@
   style();
 
   /* ---------- 3. Secours : saute les pubs qui passeraient quand meme ---------- */
-  var muted = false, seen = false, shortsPasses = new WeakSet();
+  var muted = false, mutedEl = null, seen = false, shortsPasses = new WeakSet();
+  // Le son coupe pendant une pub est toujours remis sur le meme element (et jamais laisse coupe)
+  function rendreSon(v) {
+    try { if (mutedEl) mutedEl.muted = false; } catch (e) {}
+    try { if (v && muted) v.muted = false; } catch (e) {}
+    mutedEl = null; muted = false;
+  }
+  // Ecran noir "fantome" : YouTube garde le lecteur en mode pub (duree d'une pub sur la barre) alors qu'il n'y a plus rien a jouer.
+  // Apres 4 s sans que la lecture demarre, on recharge la page une seule fois (le conseil des utilisateurs de bloqueurs).
+  var fantId = null, fantDebut = 0;
+  function fantome(p, v, ad) {
+    if (location.pathname.indexOf('/watch') !== 0 || !p || !v) { fantId = null; return; }
+    var id = new URLSearchParams(location.search).get('v');
+    if (id !== fantId) { fantId = id; fantDebut = 0; }
+    if (!ad || v.currentTime > 0.5 || (window.__lwAgr && Date.now() < window.__lwAgr) || window.__lwPip) { fantDebut = 0; return; }
+    if (!fantDebut) { fantDebut = Date.now(); return; }
+    if (Date.now() - fantDebut < 4000) return;
+    try {
+      var cle = 'lw_fant', dej = sessionStorage.getItem(cle) || '';
+      var m = /^(.*)\|(\d+)$/.exec(dej);
+      if (m && m[1] === id && Date.now() - +m[2] < 120000) return; // deja recharge pour cette video
+      sessionStorage.setItem(cle, id + '|' + Date.now());
+    } catch (e) { return; }
+    fantDebut = 0;
+    location.reload();
+  }
   // Sans les pubs, le lecteur attend parfois une pub qui ne vient pas : on le relance comme si on touchait le curseur
   var blocVid = null, blocDebut = 0, blocEssais = 0;
   function debloquer(p, v) {
@@ -191,27 +230,37 @@
       }
     }
   }
-  setInterval(function () {
+  var prochain = 400;
+  function tour() {
+    prochain = 400;
     style();
     var p = document.querySelector('.html5-video-player');
-    var v = document.querySelector('video');
+    var v = document.querySelector('.html5-main-video') || document.querySelector('video');
     if (!ACTIF) {
-      if (muted && v) { v.muted = false; muted = false; }
+      if (muted || mutedEl) rendreSon(v);
       seen = false;
       return;
     }
     passerShortPub();
     debloquer(p, v);
-    var ad = p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting'));
+    var ad = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
+    fantome(p, v, ad);
     if (ad && v) {
-      if (!v.muted) { v.muted = true; muted = true; }
+      prochain = 150;
+      if (!v.muted) { v.muted = true; mutedEl = v; muted = true; }
       if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration;
       var sk = document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-skip-button-container button');
       if (sk) sk.click();
       if (!seen) { seen = true; if (Date.now() - dernierComptage > 20000) bump(); }
     } else {
       seen = false;
-      if (muted && v) { v.muted = false; muted = false; }
+      if (muted || mutedEl) rendreSon(v);
+      // au demarrage d'une video on regarde plus souvent (pour reagir vite si le lecteur reste bloque)
+      if (v && location.pathname.indexOf('/watch') === 0 && !(v.currentTime > 1)) prochain = 150;
     }
-  }, 400);
+  }
+  (function boucle() {
+    try { tour(); } catch (e) {}
+    setTimeout(boucle, prochain);
+  })();
 })();
