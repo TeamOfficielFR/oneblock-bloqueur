@@ -20,6 +20,13 @@
     LOG('demarrage ' + (window.ytcfg || window.yt ? 'APRES les scripts du site (trop tard)' : 'avant les scripts du site') +
       ' (scripts ' + document.scripts.length + ', ' + document.readyState + ', ' + location.pathname.slice(0, 14) + ')');
   } catch (e) {}
+  var ATT = {};                      // videos pour lesquelles YouTube avait prevu une pub au debut (ecran d'attente)
+  // 1.14 (essai, facon IgeBlock) : la pub du DEBUT n'est plus retiree de la reponse ; on la laisse au lecteur et on la passe
+  // aussitot (son coupe, cachee sous l'ecran d'attente, avancee jusqu'a la fin). Si le serveur la voit "jouee", il ne retient
+  // plus la video. Les pubs plus tard dans la video sont toujours retirees. Si la pub reste bloquee, on revient au retrait.
+  var PASSER = true, passerEchec = {}, nEchecPasser = 0, GARDE = {};
+  try { if (window.__lwPasser === false) PASSER = false; } catch (e) {}
+  var jsO = JSON.stringify;
   // Le bloqueur peut etre coupe/active depuis le menu, a chaud (sans recharger la page)
   var ACTIF = call('bloqueurActif') !== false;
   setInterval(function () { ACTIF = call('bloqueurActif') !== false; }, 800);
@@ -61,9 +68,10 @@
     d = d || 0;
     if (!ACTIF || !o || typeof o !== 'object' || d > 4) return o;
     try {
-      if (o.adPlacements || o.adSlots || o.playerAds) compterPubsRetirees(o);
+      if (o.adPlacements || o.adSlots || o.playerAds) { compterPubsRetirees(o); try { noterAttente(o); } catch (e) {} }
+      var garde = false; try { garde = garderDebut(o); } catch (e) { garde = false; }
       var gone = [];
-      for (var i = 0; i < KEYS.length; i++) {
+      if (!garde) for (var i = 0; i < KEYS.length; i++) {
         if (Object.prototype.hasOwnProperty.call(o, KEYS[i])) { delete o[KEYS[i]]; gone.push(KEYS[i]); }
       }
       var vid = o.videoDetails && o.videoDetails.videoId;
@@ -72,9 +80,10 @@
         // (un objet deja traite n'est pas note deux fois ; deux reponses successives pour la meme video le sont toutes les deux)
         var now = Date.now(), deja = repVues ? repVues.has(o) : false;
         if (repVues) repVues.add(o);
-        if (!deja) { var en = entree(vid); en.tp = now; if (gone.length) en.a = 1; }
+        if (!deja) { var en = entree(vid); en.tp = now; if (gone.length || garde) en.a = 1; if (garde) en.p = 1; }
         if (!deja && nRep++ < 60) {
-          LOG('reponse lecteur ' + vid + (SRC ? ' [' + SRC + ']' : '') + ' : ' + (gone.length ? 'PUBS retirees (' + gone.join(',') + ')' : 'sans pub') +
+          LOG('reponse lecteur ' + vid + (SRC ? ' [' + SRC + ']' : '') + ' : ' + (garde ? 'pub de DEBUT gardee pour etre passee (' + garde + ')' :
+            gone.length ? 'PUBS retirees (' + gone.join(',') + ')' : 'sans pub') +
             ', drapeau ' + (tFlag && now - tFlag < 25000 ? 'envoye il y a ' + ((now - tFlag) / 1000).toFixed(1) + ' s' : 'NON envoye') +
             (o.videoDetails.isLive ? ', direct' : ''));
         }
@@ -118,7 +127,10 @@
       }
       return;
     }
-    for (var k in o) { var v = o[k]; if (v && typeof v === 'object') nettoyer(v, d + 1); }
+    for (var k in o) {
+      if (o.videoDetails && (k === 'adPlacements' || k === 'adSlots' || k === 'playerAds')) continue;   // pub de debut gardee (1.14)
+      var v = o[k]; if (v && typeof v === 'object') nettoyer(v, d + 1);
+    }
   }
   var pruneBase = prune;
   prune = function (o, d) {
@@ -348,7 +360,7 @@
         try { u = typeof input === 'string' ? input : (input && input.url) || String(input || ''); } catch (e) {}
         var pr = fetchBase(this, arguments, input, init, u);
         var cb = null;
-        try { if (ACTIF && combine && Date.now() - combine.t < 700 && YT_RE.test(u) && !PLAYER_RE.test(u)) cb = combine; } catch (e) {}
+        try { if (ACTIF && !PASSER && combine && Date.now() - combine.t < 700 && YT_RE.test(u) && !PLAYER_RE.test(u)) cb = combine; } catch (e) {}
         if (!cb) return pr;
         return pr.then(function (resp) {
           return remplacer(resp, u, input, init, cb).then(null, function (e) { LOG('essai : echec (' + String(e && e.message || e).slice(0, 40) + ')'); return resp; });
@@ -380,7 +392,7 @@
         if (!en || en.d !== null || !(en.tq || en.tp)) return;
         var t0 = en.tq || en.tp; if (Date.now() - t0 > 60000) return;
         en.d = (Date.now() - t0) / 1000;
-        STL.push([id, en.a ? 1 : 0, en.s ? 1 : 0, +en.d.toFixed(1)]); if (STL.length > 12) STL.shift();
+        STL.push([id, en.a ? 1 : 0, en.s ? 1 : 0, +en.d.toFixed(1), en.p ? 1 : 0]); if (STL.length > 12) STL.shift();
         try { localStorage.setItem('lw_bqstat', js.call(JSON, STL)); } catch (x) {}
       } catch (x) {}
     }, true);
@@ -388,7 +400,7 @@
   // resume affiche par le journal : + = YouTube avait prevu une pub, - = sans pub, S = reponse remplacee ; nombre = secondes avant la lecture
   window.__lwStat = function () {
     var a = STL.slice(-7), r = [], pubs = 0;
-    for (var i = 0; i < a.length; i++) { if (a[i][1]) pubs++; r.push((a[i][1] ? '+' : '-') + (a[i][2] ? 'S' : '') + a[i][3]); }
+    for (var i = 0; i < a.length; i++) { if (a[i][1]) pubs++; r.push((a[i][1] ? '+' : '-') + (a[i][2] ? 'S' : '') + (a[i][4] ? 'P' : '') + a[i][3]); }
     return a.length ? 'depart ' + a.length + ' videos, ' + pubs + ' avec pub : ' + r.join(' ') : '';
   };
   // Auto-verification : le site ou un autre script a-t-il repris la main sur nos crochets ?
@@ -423,8 +435,161 @@
   }
   style();
 
+  /* ---------- 2b. Ecran d'attente ----------
+     Quand YouTube avait prevu une pub au debut, son serveur retient la video pendant ~80 % de la duree de cette pub,
+     meme si la pub n'est pas jouee. On ne peut pas l'empecher : on remplace l'ecran noir par l'image de la video,
+     un rond de chargement, un message et un compte a rebours. */
+  function nombre(x) { var n = typeof x === 'number' ? x : (typeof x === 'string' && /^\d+(\.\d+)?$/.test(x) ? +x : NaN); return isFinite(n) ? n : NaN; }
+  function dureeAnnonce(v) {
+    var m = typeof v.playerVars === 'string' && /(?:^|&)length_seconds=(\d+(?:\.\d+)?)/.exec(v.playerVars);
+    if (m) return +m[1];
+    var best = 0;
+    (function scan(o, d) {
+      if (!o || typeof o !== 'object' || d > 6 || best) return;
+      for (var k in o) {
+        var val = o[k];
+        if (/^(lengthSeconds|videoLengthSeconds|durationSeconds|adDurationSeconds)$/.test(k)) { var n = nombre(val); if (n > 0 && n < 900) { best = n; return; } }
+        else if (/^(durationMs|durationMilliseconds|videoDurationMs|lengthMs|adDurationMs|videoLengthMs)$/.test(k)) { var n2 = nombre(val); if (n2 > 0 && n2 < 900000) { best = n2 / 1000; return; } }
+        else if (val && typeof val === 'object' && k !== 'pings' && k !== 'trackingParams') scan(val, d + 1);
+      }
+    })(v, 0);
+    return best;
+  }
+  function annonces(x, d, acc) {
+    if (!x || typeof x !== 'object' || d > 18) return;
+    if (Array.isArray(x)) { for (var i = 0; i < x.length; i++) annonces(x[i], d + 1, acc); return; }
+    for (var k in x) {
+      var v = x[k];
+      if (k === 'instreamVideoAdRenderer' && v && typeof v === 'object') {
+        var cle = v.externalVideoId || v.adVideoId || v.layoutId || ('#' + acc.n);
+        if (acc.vus[cle]) continue;
+        acc.vus[cle] = 1; acc.n++;
+        var sec = dureeAnnonce(v); if (sec > 0) acc.s += sec; else acc.inconnu++;
+      } else if (v && typeof v === 'object') annonces(v, d + 1, acc);
+    }
+  }
+  function estDebut(pl) {
+    try {
+      var c = pl && pl.adPlacementRenderer && pl.adPlacementRenderer.config && pl.adPlacementRenderer.config.adPlacementConfig;
+      if (c && (c.kind === 'AD_PLACEMENT_KIND_START' || (c.adTimeOffset && String(c.adTimeOffset.offsetStartMilliseconds) === '0'))) return true;
+      return /BEFORE_CONTENT|beforeContentVideoIdStartedTrigger|AD_PLACEMENT_KIND_START/.test(jsO.call(JSON, pl) || '');
+    } catch (e) { return false; }
+  }
+  function noterAttente(o) {
+    var id = o.videoDetails && o.videoDetails.videoId;
+    if (!id || !ACTIF) return;
+    var acc = { s: 0, n: 0, inconnu: 0, vus: {} }, debut = false;
+    [o.adPlacements, o.adSlots].forEach(function (l) {
+      if (!Array.isArray(l)) return;
+      for (var i = 0; i < l.length; i++) if (estDebut(l[i])) { debut = true; annonces(l[i], 0, acc); }
+    });
+    var prev = ATT[id];
+    if (prev && !prev.fini && Date.now() - prev.t < 3000) return;   // meme chargement, reponse vue deux fois
+    var att = debut && acc.s > 0 && !acc.inconnu ? Math.round(acc.s * 8) / 10 : null;
+    ATT[id] = { t: Date.now(), att: att, debut: debut, fini: false, vu: 0 };
+    LOG(debut ? 'pub de debut prevue (' + acc.n + ' annonce' + (acc.n > 1 ? 's' : '') +
+      (att ? ', ' + acc.s + ' s) -> attente ~' + att + ' s' : ', duree inconnue)') : 'pas de pub de debut (pubs plus tard seulement)');
+  }
+  // garde seulement la pub du debut (retire celles de plus tard) ; renvoie le resume, ou false si on retire tout comme avant
+  function garderDebut(o) {
+    var id = o.videoDetails && o.videoDetails.videoId;
+    if (!PASSER || !id || passerEchec[id] || nEchecPasser >= 2) return false;
+    var dp = Array.isArray(o.adPlacements) ? o.adPlacements.filter(estDebut) : [];
+    var ds = Array.isArray(o.adSlots) ? o.adSlots.filter(estDebut) : [];
+    if (!dp.length && !ds.length) return false;
+    var nP = Array.isArray(o.adPlacements) ? o.adPlacements.length - dp.length : 0;
+    var nS = Array.isArray(o.adSlots) ? o.adSlots.length - ds.length : 0;
+    if (o.adPlacements) o.adPlacements = dp;
+    if (o.adSlots) o.adSlots = ds;
+    GARDE[id] = Date.now();
+    return dp.length + ' emplacement(s), ' + ds.length + ' slot(s)' + (nP + nS ? ', ' + (nP + nS) + ' pub(s) plus tard retiree(s)' : '');
+  }
+  function echecPasser(id, pourquoi) {
+    if (passerEchec[id]) return;
+    passerEchec[id] = 1; nEchecPasser++;
+    LOG('pub de debut ' + pourquoi + ' -> retour au retrait des pubs' + (nEchecPasser >= 2 ? ' (pour toute la session)' : ' pour cette video'));
+  }
+  function idPage() { return location.pathname.indexOf('/watch') === 0 ? new URLSearchParams(location.search).get('v') : null; }
+  var ecran = null, ecranId = null;
+  function finirAttente(a, pourquoi) {
+    a.fini = true;
+    if (a.vu) LOG('ecran d\'attente retire (' + pourquoi + ') apres ' + ((Date.now() - a.vu) / 1000).toFixed(1) + ' s');
+  }
+  function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt) e.textContent = txt; return e; }
+  function construireEcran(id) {
+    var coul = '#F7D154';
+    try { var cc = jp.call(JSON, localStorage.getItem('lw_color') || 'null'); if (typeof cc === 'string' && /^#[0-9a-f]{3,8}$/i.test(cc)) coul = cc; } catch (e) {}
+    var css = document.getElementById('lw-attente-css');
+    if (!css) { css = el('style'); css.id = 'lw-attente-css'; (document.head || document.documentElement).appendChild(css); }
+    css.textContent = '@keyframes lwaRot{to{transform:rotate(360deg)}}' +
+      '#lw-attente{position:fixed;z-index:2147483000;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;' +
+      'pointer-events:none;background:#000;font-family:Roboto,Arial,sans-serif;color:#fff;text-align:center;box-sizing:border-box;padding:8px}' +
+      '#lw-attente .lwa-f{position:absolute;left:0;top:0;right:0;bottom:0;background-position:center;background-size:cover;filter:brightness(.35);transform:scale(1.05)}' +
+      '#lw-attente .lwa-r{position:relative;width:38px;height:38px;border-radius:50%;box-sizing:border-box;border:3px solid rgba(255,255,255,.22);' +
+      'border-top-color:' + coul + ';animation:lwaRot .9s linear infinite;margin-bottom:10px}' +
+      '#lw-attente .lwa-t{position:relative;font-size:15px;font-weight:700;text-shadow:0 1px 3px #000}' +
+      '#lw-attente .lwa-s{position:relative;font-size:12.5px;margin-top:2px;opacity:.92;text-shadow:0 1px 3px #000}' +
+      '#lw-attente .lwa-c{position:relative;font-size:12px;margin-top:8px;padding:3px 10px;border-radius:12px;background:rgba(0,0,0,.5);color:' + coul + '}';
+    var e = el('div'); e.id = 'lw-attente';
+    var f = el('div', 'lwa-f');
+    if (id && /^[\w-]{11}$/.test(id)) f.style.backgroundImage = 'url(https://i.ytimg.com/vi/' + id + '/hqdefault.jpg)';
+    e.appendChild(f);
+    e.appendChild(el('div', 'lwa-r'));
+    e.appendChild(el('div', 'lwa-t', 'ONEBlock s\u2019excuse'));
+    e.appendChild(el('div', 'lwa-s', 'YouTube oblige l\u2019attente'));
+    e.appendChild(el('div', 'lwa-c', ''));
+    return e;
+  }
+  function montrerAttente(a, p, id) {
+    if (!a) { if (ecran) { try { ecran.remove(); } catch (e) {} ecran = null; ecranId = null; } return; }
+    var r = p.getBoundingClientRect();
+    if (!ecran || !ecran.isConnected || ecranId !== id) {
+      if (ecran) { try { ecran.remove(); } catch (e) {} }
+      ecran = construireEcran(id); ecranId = id;
+      document.documentElement.appendChild(ecran);
+      if (!a.vu) { a.vu = Date.now(); LOG('ecran d\'attente affiche' + (a.att ? ' (~' + a.att + ' s prevues)' : '')); }
+    }
+    var st = ecran.style;
+    if (r.width < 80 || r.height < 60) { st.display = 'none'; return; }
+    st.display = 'flex'; st.left = r.left + 'px'; st.top = r.top + 'px'; st.width = r.width + 'px'; st.height = r.height + 'px';
+    var reste = a.att && !GARDE[id] ? Math.ceil(a.att - (Date.now() - a.t) / 1000) : null;
+    var txt = a.pub ? 'Pub en cours de saut\u2026' : reste === null ? 'La lecture va d\u00e9marrer' : (reste >= 1 ? 'Lecture dans ' + reste + ' s' : 'Encore un instant\u2026');
+    var c = ecran.lastChild; if (c && c.textContent !== txt) c.textContent = txt;
+  }
+  // vrai pendant l'attente imposee (l'ecran est alors affiche)
+  function attenteEcran(p, v) {
+    var id = idPage(), a = id && ATT[id], on = false;
+    if (a && !a.fini) {
+      var dep = Date.now() - a.t, pub = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
+      if (!ACTIF) finirAttente(a, 'bloqueur coupe');
+      else if (dep > 60000) finirAttente(a, 'delai');
+      else if (!pub && v && !v.paused && v.readyState >= 3 && dep > 300 && !(a.pubVue && Date.now() - a.pubVue < 400)) finirAttente(a, 'lecture');
+      else if (p && v && !(window.__lwAgr && Date.now() < window.__lwAgr) && !window.__lwPip && !document.documentElement.classList.contains('lw-pip')) {
+        if (pub) { a.pubVue = Date.now(); if (GARDE[id]) { on = true; a.pub = true; } }
+        else if ((dep > 1500 || (a.pubVue && GARDE[id])) && !p.classList.contains('paused-mode')) { on = true; a.pub = false; }
+      }
+    }
+    montrerAttente(on ? a : null, p, id);
+    return on;
+  }
+  try {
+    document.addEventListener('playing', function (e) {
+      try {
+        var v = e.target; if (!v || v.tagName !== 'VIDEO') return;
+        var id = idPage(), a = id && ATT[id];
+        if (!a || a.fini || Date.now() - a.t <= 200) return;
+        var pl = document.querySelector('.html5-video-player');
+        function enPub() { return !!(pl && (pl.classList.contains('ad-showing') || pl.classList.contains('ad-interrupting'))); }
+        if (enPub()) return;                                   // c'est la pub qui demarre (on la passe), pas la video
+        if (!GARDE[id]) { finirAttente(a, 'lecture'); montrerAttente(null); return; }
+        // pub gardee : la classe "pub" peut arriver juste apres ; on reverifie un instant plus tard
+        setTimeout(function () { try { if (!a.fini && !enPub() && !v.paused) { finirAttente(a, 'lecture'); montrerAttente(null); } } catch (x) {} }, 350);
+      } catch (x) {}
+    }, true);
+  } catch (e) {}
+
   /* ---------- 3. Secours : saute les pubs qui passeraient quand meme ---------- */
-  var muted = false, mutedEl = null, seen = false, shortsPasses = new WeakSet();
+  var muted = false, mutedEl = null, seen = false, shortsPasses = new WeakSet(), vitesseEl = null, vitesseAvant = 1, pubDebut = 0;
   // Le son coupe pendant une pub est toujours remis sur le meme element (et jamais laisse coupe)
   function rendreSon(v) {
     try { if (mutedEl) mutedEl.muted = false; } catch (e) {}
@@ -444,6 +609,7 @@
     var d = Date.now() - fantDebut;
     if (d < 4000) return;
     if (!fantEtape && typeof p.loadVideoById === 'function') {
+      if (GARDE[id]) echecPasser(id, 'bloquee ' + (d / 1000).toFixed(1) + ' s');
       fantEtape = 1;
       LOG('bloque ' + (d / 1000).toFixed(1) + ' s -> relance douce');
       try {
@@ -510,22 +676,30 @@
     var p = document.querySelector('.html5-video-player');
     var v = document.querySelector('.html5-main-video') || document.querySelector('video');
     if (!ACTIF) {
+      if (ecran) { try { attenteEcran(p, v); } catch (e) {} }
+      if (vitesseEl) { try { if (vitesseEl.playbackRate === 16) vitesseEl.playbackRate = vitesseAvant > 0 && vitesseAvant < 16 ? vitesseAvant : 1; } catch (e) {} vitesseEl = null; }
       if (muted || mutedEl) rendreSon(v);
       seen = false;
       return;
     }
     passerShortPub();
-    debloquer(p, v);
+    var enAttente = false;
+    try { enAttente = attenteEcran(p, v); } catch (e) {}
+    if (!enAttente) debloquer(p, v);
     var ad = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
     fantome(p, v, ad);
     if (ad && v) {
-      prochain = 150;
+      prochain = 100;
       if (!v.muted) { v.muted = true; mutedEl = v; muted = true; }
+      try { if (vitesseEl !== v) { vitesseEl = v; vitesseAvant = v.playbackRate; } if (v.playbackRate !== 16) v.playbackRate = 16; } catch (e) {}
+      if (!pubDebut) pubDebut = Date.now();
       if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration;
       var sk = document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-skip-button-container button');
       if (sk) sk.click();
       if (!seen) { seen = true; LOG('pub detectee, saut'); if (Date.now() - dernierComptage > 20000) bump(); }
     } else {
+      if (pubDebut) { LOG('pub passee en ' + ((Date.now() - pubDebut) / 1000).toFixed(1) + ' s'); pubDebut = 0; }
+      if (vitesseEl) { try { if (vitesseEl.playbackRate === 16) vitesseEl.playbackRate = vitesseAvant > 0 && vitesseAvant < 16 ? vitesseAvant : 1; } catch (e) {} vitesseEl = null; }
       seen = false;
       if (muted || mutedEl) rendreSon(v);
       // au demarrage d'une video on regarde plus souvent (pour reagir vite si le lecteur reste bloque)
