@@ -53,6 +53,9 @@
       for (var i = 0; i < KEYS.length; i++) {
         if (Object.prototype.hasOwnProperty.call(o, KEYS[i])) delete o[KEYS[i]];
       }
+      // fenetre "les bloqueurs de pub ne sont pas autorises" : elle met la video en pause
+      var mr = o.auxiliaryUi && o.auxiliaryUi.messageRenderers;
+      if (mr && mr.enforcementMessageViewModel) delete mr.enforcementMessageViewModel;
       if (o.playerResponse) prune(o.playerResponse, d + 1);
       if (o.response) prune(o.response, d + 1);
       if (Array.isArray(o)) for (var j = 0; j < o.length && j < 10; j++) prune(o[j], d + 1);
@@ -94,7 +97,7 @@
   var pruneBase = prune;
   prune = function (o, d) {
     o = pruneBase(o, d);
-    if (ACTIF && o && typeof o === 'object' && !d) {
+    if (ACTIF && o && typeof o === 'object' && !d && !(o.streamingData && o.videoDetails)) {
       retires = 0;
       try { nettoyer(o, 0); } catch (e) {}
       for (var r = 0; r < retires && r < 20; r++) bump();
@@ -113,6 +116,23 @@
       Object.defineProperty(window, n, { configurable: true, get: function () { return v; }, set: function (x) { v = (x && typeof x === 'object') ? prune(x) : x; } });
     } catch (e) {}
   });
+
+  /* ---------- 1b. Evite l'attente factice du debut de video (methode d'uBlock Origin) ---------- */
+  // Pour certains comptes avec bloqueur, YouTube retarde le premier flux video de la duree d'une pub (ecran noir).
+  // On ajoute "isInlinePlaybackNoAd" dans la requete du lecteur : le serveur n'envoie alors ni pub ni attente.
+  // Fonctionne quand on passe d'une video a l'autre dans la page (la requete est faite ici, pas par le serveur).
+  var FLAG_RE = /contentPlaybackContext":\{(\}?)/;
+  try {
+    var js = JSON.stringify;
+    JSON.stringify = function () {
+      var r = js.apply(this, arguments);
+      if (ACTIF && typeof r === 'string' && r.length < 60000 && r.indexOf('contentPlaybackContext') > -1 &&
+          r.indexOf('isInlinePlaybackNoAd') < 0) {
+        r = r.replace(FLAG_RE, function (m, fin) { return 'contentPlaybackContext":{"isInlinePlaybackNoAd":true' + (fin ? '}' : ','); });
+      }
+      return r;
+    };
+  } catch (e) {}
 
   /* ---------- 2. Cache les emplacements publicitaires ---------- */
   var CSS_PUB = 'ytm-promoted-sparkles-web-renderer,ad-slot-renderer,ytm-companion-ad-renderer,ytm-promoted-video-renderer,' +
