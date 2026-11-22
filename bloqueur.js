@@ -31,6 +31,14 @@
   // passent, les pubs des listes cachees par le style. C'est ce que fait IgeBlock. Pas d'ecran d'attente.
   var IGE = true, ECRAN = false;
   try { if (window.__lwIge === false) { IGE = false; ECRAN = true; } } catch (e) {}
+  // 1.23 : YOUTUBE TV (youtube.com/tv, ONEBlockTV). Comme TizenTube (bloqueur connu de YouTube TV) : les pubs sont retirees
+  // des reponses de YouTube (JSON), aucune demande n'est modifiee. Si la TV se met quand meme a attendre au debut des videos
+  // (attente imposee par YouTube), on repasse tout seul au saut des pubs pour la session (sessionStorage lw_tv_saut).
+  var TV = /(^|\.)youtube\.com$/.test(location.hostname) && /^\/tv(\/|$)/.test(location.pathname);
+  var TV_SAUT = false;
+  try { TV_SAUT = TV && (window.__lwTvSaut === true || sessionStorage.getItem('lw_tv_saut') === '1'); } catch (e) {}
+  var TVRET = TV && !TV_SAUT;
+  if (TV) ECRAN = false;
   var jsO = JSON.stringify;
   // Le bloqueur peut etre coupe/active depuis le menu, a chaud (sans recharger la page)
   var ACTIF = call('bloqueurActif') !== false;
@@ -69,12 +77,13 @@
   /* ---------- 1. Retire les pubs des donnees de YouTube ---------- */
   var nPrune = 0, nFlag = 0, nRep = 0, nReq = 0, tFlag = 0, SRC = '', repVues = (typeof WeakSet === 'function' ? new WeakSet() : null);
   var KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams', 'adBreakParams'];
+  var tvRetire = {}, tvVu = {}, tvOk = {};
   var prune = function (o, d) {
     d = d || 0;
     if (!ACTIF || !o || typeof o !== 'object' || d > 4) return o;
     try {
       if (o.adPlacements || o.adSlots || o.playerAds) { compterPubsRetirees(o); try { noterAttente(o); } catch (e) {} }
-      var garde = false; try { garde = garderDebut(o); } catch (e) { garde = false; }
+      var garde = false; try { garde = TV ? false : garderDebut(o); } catch (e) { garde = false; }
       var gone = [];
       if (!garde) for (var i = 0; i < KEYS.length; i++) {
         if (Object.prototype.hasOwnProperty.call(o, KEYS[i])) { delete o[KEYS[i]]; gone.push(KEYS[i]); }
@@ -86,6 +95,7 @@
         var now = Date.now(), deja = repVues ? repVues.has(o) : false;
         if (repVues) repVues.add(o);
         if (!deja) { var en = entree(vid); en.tp = now; if (gone.length || garde) en.a = 1; if (garde) en.p = 1; }
+        if (!deja && TV && gone.length) tvRetire[vid] = now;
         if (!deja && nRep++ < 60) {
           LOG('reponse lecteur ' + vid + (SRC ? ' [' + SRC + ']' : '') + ' : ' + (garde ? 'pub de DEBUT gardee pour etre passee (' + garde + ')' :
             gone.length ? 'PUBS retirees (' + gone.join(',') + ')' : 'sans pub') +
@@ -108,7 +118,7 @@
    'compactPromotedVideoRenderer', 'displayAdRenderer', 'inFeedAdLayoutRenderer', 'statementBannerRenderer',
    'mealbarPromoRenderer', 'brandVideoShelfRenderer', 'brandVideoSingletonRenderer', 'searchPyvRenderer',
    'adBreakServiceRenderer', 'miniGameCardViewModel', 'playableGameCardViewModel', 'gameCardRenderer',
-   'reelPlayerAdOverlayRenderer', 'shortsAdRenderer'].forEach(function (k) { AD_R[k] = 1; });
+   'reelPlayerAdOverlayRenderer', 'shortsAdRenderer', 'tvMastheadRenderer'].forEach(function (k) { AD_R[k] = 1; });
   function adItem(x, d) {
     if (!x || typeof x !== 'object' || Array.isArray(x) || d > 4) return false;
     for (var k in x) { if (AD_R[k]) return true; }
@@ -149,17 +159,17 @@
   };
   var jp = JSON.parse;
   var wParse = function () { return prune(jp.apply(this, arguments)); };
-  if (!IGE) JSON.parse = wParse;
+  if (!IGE || TVRET) JSON.parse = wParse;
   var wJson = null;
   try {
     var rj = Response.prototype.json;
     wJson = function () { return rj.apply(this, arguments).then(function (r) { return prune(r); }); };
-    if (!IGE) Response.prototype.json = wJson;
+    if (!IGE || TVRET) Response.prototype.json = wJson;
   } catch (e) {}
   // Reponses recues par XMLHttpRequest en JSON (elles ne passent ni par JSON.parse ni par Response.json)
   try {
     var xr = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'response');
-    if (xr && xr.get && !IGE) {
+    if (xr && xr.get && (!IGE || TVRET)) {
       Object.defineProperty(XMLHttpRequest.prototype, 'response', {
         configurable: true, enumerable: xr.enumerable,
         get: function () {
@@ -170,7 +180,7 @@
       });
     }
   } catch (e) {}
-  if (!IGE) ['ytInitialPlayerResponse', 'playerResponse', 'ytInitialData'].forEach(function (n) {
+  if (!IGE || TVRET) ['ytInitialPlayerResponse', 'playerResponse', 'ytInitialData'].forEach(function (n) {
     try {
       var v = typeof window[n] === 'object' ? prune(window[n]) : window[n];
       Object.defineProperty(window, n, { configurable: true, get: function () { return v; }, set: function (x) {
@@ -419,7 +429,9 @@
       ok(Response.prototype, 'json', wJson), ok(XMLHttpRequest.prototype, 'send', wSend)].join(', ');
   }
   var etat0 = IGE ? '' : etatCrochets();
-  LOG(IGE ? 'mode IgeBlock : donnees de YouTube non modifiees (aucun crochet, pas de drapeau), pubs sautees quand elles passent' : 'crochets : ' + etat0);
+  if (TV) LOG(TVRET ? 'mode TV : pubs retirees des reponses de YouTube (comme TizenTube), aucune demande modifiee' :
+    'mode TV : saut des pubs (la TV attendait au debut des videos sans pub)');
+  else LOG(IGE ? 'mode IgeBlock : donnees de YouTube non modifiees (aucun crochet, pas de drapeau), pubs sautees quand elles passent' : 'crochets : ' + etat0);
   if (!IGE) [3000, 12000].forEach(function (ms) {
     setTimeout(function () { try { var e2 = etatCrochets(); LOG('crochets a ' + (ms / 1000) + ' s : ' + (e2 === etat0 ? 'inchanges' : e2)); } catch (e) {} }, ms);
   });
@@ -616,7 +628,11 @@
     passerEchec[id] = 1; nEchecPasser++;
     LOG('pub de debut ' + pourquoi + ' -> retour au retrait des pubs' + (nEchecPasser >= 2 ? ' (pour toute la session)' : ' pour cette video'));
   }
-  function idPage() { return location.pathname.indexOf('/watch') === 0 ? new URLSearchParams(location.search).get('v') : null; }
+  function idPage() {
+    if (location.pathname.indexOf('/watch') === 0) return new URLSearchParams(location.search).get('v');
+    if (TV && /^#\/watch/.test(location.hash)) { var m = /[?&]v=([\w-]{6,20})/.exec(location.hash); return m ? m[1] : null; }
+    return null;
+  }
   var ecran = null, ecranId = null;
   function finirAttente(a, pourquoi) {
     a.fini = true;
@@ -786,7 +802,7 @@
       var t = (tContenuId === id ? Math.floor(tContenu) : 0) || parseInt(new URLSearchParams(location.search).get('t'), 10) || 0;
       LOG('pub figee ' + (d / 1000).toFixed(1) + ' s -> nouvelle demande de la video (t=' + t + ')');
       try { p.loadVideoById(t > 0 ? { videoId: id, startSeconds: t } : id); } catch (e) {}
-    } else if (d > 14000 && pubEtape < 5 && id) {
+    } else if (d > 14000 && pubEtape < 5 && id && !TV) {
       pubEtape = 5;
       try {
         var cle = 'lw_fant', dej = sessionStorage.getItem(cle) || '', m = /^(.*)\|(\d+)$/.exec(dej);
@@ -799,6 +815,7 @@
   }
   // appui simule au milieu du lecteur (comme un doigt) : toucher, puis clic
   function appuiSimule(p) {
+    if (TV) return;
     if (toucherNatif(p)) { LOG('pub figee : vrai appui au milieu du lecteur'); return; }
     try {
       var r = p.getBoundingClientRect(); if (r.width < 10 || r.height < 10) return;
@@ -884,6 +901,23 @@
   }
   setTimeout(function cycle() { try { detecteur(); } catch (e) {} setTimeout(cycle, 2000); }, 300);
 
+  // TV, pubs retirees : une video qui ne demarre pas 7 s apres son ouverture alors que YouTube avait prevu une pub = attente
+  // imposee -> saut des pubs pour la session et rechargement (la page revient au meme endroit).
+  function tvAttente(p, v, ad) {
+    var id = idPage();
+    if (!id || !tvRetire[id] || tvOk[id]) return;
+    if (!tvVu[id]) tvVu[id] = Date.now();
+    if (ad) { tvOk[id] = 1; return; }                                  // une pub passe quand meme : le saut s'en occupe
+    if (v && v.currentTime > 0.6) { tvOk[id] = 1; LOG('TV : video partie en ' + ((Date.now() - Math.max(tvRetire[id], tvVu[id])) / 1000).toFixed(1) + ' s, sans pub'); return; }
+    if (!v || window.__pauseUser || (v.paused && p && p.classList.contains('paused-mode'))) return;   // mis en pause par toi
+    var d = Date.now() - Math.max(tvRetire[id], tvVu[id]);
+    if (d < 7000) return;
+    tvOk[id] = 1;
+    LOG('TV : la video ne demarre pas apres ' + (d / 1000).toFixed(1) + ' s sans pub -> saut des pubs pour la session, rechargement');
+    try { sessionStorage.setItem('lw_tv_saut', '1'); } catch (e) { return; }
+    location.reload();
+  }
+
   var prochain = 400;
   function tour() {
     prochain = 400;
@@ -903,13 +937,16 @@
     if (!enAttente && !IGE) debloquer(p, v);
     var ad = !!(p && (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')));
     if (!IGE) fantome(p, v, ad);
+    if (ad) window.__lwPubT = Date.now();
+    if (TVRET) { try { tvAttente(p, v, ad); } catch (e) {} }
     if (ad && v) {
       prochain = 100;
       if (!v.muted) { v.muted = true; mutedEl = v; muted = true; }
       try { if (vitesseEl !== v) { vitesseEl = v; vitesseAvant = v.playbackRate; } if (v.playbackRate !== 16) v.playbackRate = 16; } catch (e) {}
       if (!pubDebut) pubDebut = Date.now();
       if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration;
-      var sk = document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-skip-button-container button,.ytp-ad-skip-button-slot button');
+      var sk = document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button,.ytp-ad-skip-button-container button,.ytp-ad-skip-button-slot button' +
+        (TV ? ',ytlr-skip-button-renderer,ytlr-skip-ad-renderer,.ytlr-skip-button-renderer' : ''));
       if (sk) sk.click();
       if (!seen) { seen = true; LOG('pub detectee, saut'); if (Date.now() - dernierComptage > 20000) bump(); }
       try { pubFigee(p, v); } catch (e) {}
