@@ -495,6 +495,7 @@
   // comme IgeBlock : bouton "reactiver le son" visible sur une video -> appui dessus, puis sur le gros bouton lecture s'il apparait
   var sonClic = 0, lectureClic = {};
   function boutonSon(p, v) {
+    if (window.__lwCastEnCours && window.__lwCastIci !== location.href) return;   // cast vers la TV : la video du telephone reste en pause
     if (!p || location.pathname.indexOf('/watch') !== 0 || p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')) return;
     var b = p.querySelector('button.ytp-unmute');
     if (b && b.offsetParent !== null && Date.now() - sonClic > 1500) {
@@ -797,7 +798,7 @@
       LOG('pub toujours figee -> fin forcee');
       try { if (isFinite(dur) && dur > 0) v.currentTime = dur; } catch (e) {}
       try { v.dispatchEvent(new Event('ended')); } catch (e) {}
-    } else if (d > 7500 && pubEtape < 4 && id && typeof p.loadVideoById === 'function') {
+    } else if (d > (tContenuId === id && tContenu > 5 ? 4500 : 7500) && pubEtape < 4 && id && typeof p.loadVideoById === 'function') {
       pubEtape = 4;
       var t = (tContenuId === id ? Math.floor(tContenu) : 0) || parseInt(new URLSearchParams(location.search).get('t'), 10) || 0;
       LOG('pub figee ' + (d / 1000).toFixed(1) + ' s -> nouvelle demande de la video (t=' + t + ')');
@@ -809,7 +810,11 @@
         if (m && m[1] === id && Date.now() - +m[2] < 120000) { LOG('pub figee : deja recharge pour cette video, on laisse'); return; }
         sessionStorage.setItem(cle, id + '|' + Date.now());
       } catch (e) { return; }
-      LOG('pub figee ' + (d / 1000).toFixed(1) + ' s -> RECHARGEMENT de la page');
+      var tc = tContenuId === id ? Math.floor(tContenu) : 0;
+      LOG('pub figee ' + (d / 1000).toFixed(1) + ' s -> RECHARGEMENT de la page' + (tc > 5 ? ' (reprise a ' + tc + ' s)' : ''));
+      if (tc > 5) {
+        try { var u = new URL(location.href); u.searchParams.set('t', tc + 's'); location.replace(u.toString()); return; } catch (e) {}
+      }
       location.reload();
     }
   }
@@ -954,7 +959,8 @@
       pubT0 = 0; pubEtape = 0;
       try { remettreSon(p, v); } catch (e) {}
       try { boutonSon(p, v); } catch (e) {}
-      if (v && location.pathname.indexOf('/watch') === 0) { try { if (!v.paused && v.currentTime > 0.5) { tContenu = v.currentTime; tContenuId = idPage(); } } catch (e) {} }
+      var idc = idPage();
+      if (v && idc) { try { if (!v.paused && v.currentTime > 0.5) { tContenu = v.currentTime; tContenuId = idc; } } catch (e) {} }
       if (pubDebut) { LOG('pub passee en ' + ((Date.now() - pubDebut) / 1000).toFixed(1) + ' s'); pubDebut = 0; }
       if (vitesseEl) { try { if (vitesseEl.playbackRate === 16) vitesseEl.playbackRate = vitesseAvant > 0 && vitesseAvant < 16 ? vitesseAvant : 1; } catch (e) {} vitesseEl = null; }
       seen = false;
